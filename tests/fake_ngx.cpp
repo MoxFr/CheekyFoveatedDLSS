@@ -31,6 +31,7 @@ Evaluate11C forward_evaluate11_c{};
 Release12 forward_release11{};
 bool fail_evaluation{};
 bool copy_nr_color{};
+ID3D12Resource* override_nr_color{}; // Test-owned, held until GPU completion.
 bool require_feature_path{};
 bool fail_initialization{};
 std::atomic<unsigned> initializations{};
@@ -61,6 +62,7 @@ EXPORT void __cdecl CheekyOpenXR_SetSimulationPattern(unsigned) {}
 EXPORT void CheekyFakeObserveCreated(Observe callback) { observe_created = callback; }
 EXPORT void CheekyFakeFailEvaluations(bool fail) { fail_evaluation = fail; }
 EXPORT void CheekyFakeCopyNrColor(bool enabled) { copy_nr_color = enabled; }
+EXPORT void CheekyFakeNrOverrideColor(ID3D12Resource* resource) { override_nr_color = resource; }
 EXPORT void CheekyFakeRequireFeaturePath(bool enabled) { require_feature_path = enabled; }
 EXPORT void CheekyFakeFailInitialization(bool fail) { fail_initialization = fail; }
 EXPORT unsigned CheekyFakeInitializations() { return initializations.load(); }
@@ -141,12 +143,21 @@ EXPORT NgxResult NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCommandList* list
     if (ngx_succeeded(result) && copy_nr_color) {
         ID3D12Resource* color{}; ID3D12Resource* output{};
         params->Get("DLSSNR.Color", &color); params->Get("DLSSNR.Output", &output);
+        if (override_nr_color) color = override_nr_color;
         if (color && output) {
             D3D12_RESOURCE_BARRIER barriers[2]{};
             barriers[0].Type = barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             barriers[0].Transition = {color, 0, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE};
             barriers[1].Transition = {output, 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST};
-            list->ResourceBarrier(2, barriers); list->CopyResource(output, color);
+            list->ResourceBarrier(2, barriers);
+            if (override_nr_color) {
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource=color; dst.pResource=output;
+                src.Type=dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                const auto desc=output->GetDesc();
+                const D3D12_BOX box{0,0,0,static_cast<UINT>(desc.Width),desc.Height,1};
+                list->CopyTextureRegion(&dst,0,0,0,&src,&box);
+            } else list->CopyResource(output, color);
             for (auto& barrier : barriers) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
             list->ResourceBarrier(2, barriers);
         }

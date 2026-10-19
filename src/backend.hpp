@@ -50,6 +50,12 @@ struct D3D12BackendTiming {
     const CropGeometry* display_crop = nullptr
 ) noexcept;
 
+struct DetachedD3D12Feature {
+    NgxHandle* handle{};
+    D3D12ReleaseFeatureFn release{};
+};
+// Ownership transfers to the caller, which must wait for recorded GPU uses.
+[[nodiscard]] DetachedD3D12Feature detach_d3d12_feature(DlssViewId view_id) noexcept;
 void release_d3d12_view(DlssViewId view_id) noexcept;
 void skip_d3d12_history(DlssViewId view_id) noexcept;
 

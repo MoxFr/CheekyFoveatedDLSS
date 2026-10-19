@@ -35,6 +35,7 @@ std::string snapshot(CheekyHostSnapshotFn get) {
 }
 }
 int main(int argc,char** argv) {
+    setvbuf(stdout,nullptr,_IONBF,0);
     try {
         const std::string mode=argc>1 ? argv[1] : "dx12";
         const bool dx11=mode.find("dx11")!=std::string::npos;

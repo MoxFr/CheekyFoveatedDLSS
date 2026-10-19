@@ -11,6 +11,7 @@
 #include "runtime.hpp"
 #include "diagnostics.hpp"
 #include "d3d11_peripheral_dlaa.hpp"
+#include "peripheral_dlaa.hpp"
 #include "eye_calibration.hpp"
 #include "gaze_foveation.hpp"
 #include "openvr_gaze.hpp"
@@ -48,6 +49,9 @@ struct State {
     std::uint64_t attachment_sequence{};
     FrameCadence cadence;
     ULONGLONG next_timing_log{};
+    bool nr_comparison{};
+    Settings nr_comparison_original{};
+    ULONGLONG nr_comparison_deadline{};
     std::string message{"Not initialized"};
     std::atomic<bool> save_requested{}, report_requested{};
     std::atomic<bool> report_busy{}, report_browser{};
@@ -145,6 +149,10 @@ std::string snapshot_locked(State& s) {
         << ",\"gaze\":{\"layer\":" << gaze.layer_present << ",\"abi\":" << gaze.abi_compatible
         << ",\"input\":" << gaze_input_diagnostics_json(gaze.input)
         << ",\"using_gaze\":" << gaze.using_gaze << ",\"alignment\":" << gaze.alignment_source
+        << ",\"shared_gaze\":" << gaze.shared_gaze << ",\"shared_fresh\":" << gaze.shared_fresh
+        << ",\"shared_projection\":" << gaze.shared_projection
+        << ",\"shared_view\":\"" << gaze.shared_view << "\",\"shared_u\":" << gaze.shared_u
+        << ",\"shared_v\":" << gaze.shared_v << ",\"shared_evaluations\":" << gaze.shared_evaluations
         << ",\"afw_bilateral\":" << gaze.afw_bilateral << ",\"afw_fresh_sample\":" << gaze.afw_fresh_sample
         << ",\"ambiguous\":" << gaze.mapping_ambiguous << ",\"views\":" << views.active
         << ",\"submitted_copies\":" << gaze.submitted_copies
@@ -168,13 +176,31 @@ std::string snapshot_locked(State& s) {
             << ",\"fov_tangents\":[" << v.fov_tangents[0] << ',' << v.fov_tangents[1]
             << ',' << v.fov_tangents[2] << ',' << v.fov_tangents[3] << "]}";
     }
+    out << "],\"shared_recent_views\":" << gaze.shared_recent_views
+        << ",\"shared_tracking_views\":" << gaze.shared_tracking_views << ",\"shared_views\":[";
+    bool first_shared = true;
+    for (const auto& row : gaze.shared_views) if (row.view) {
+        if (!first_shared) out << ','; first_shared = false;
+        out << "{\"view\":\"" << row.view << "\",\"calls\":" << row.calls
+            << ",\"fresh_calls\":" << row.fresh_calls << ",\"fallback_calls\":" << row.fallback_calls
+            << ",\"fresh\":" << row.fresh << ",\"reject\":" << row.rejection
+            << ",\"camera_viewport\":" << row.camera_viewport << ",\"camera_age_ms\":" << row.camera_age_ms
+            << ",\"evaluation_age_ms\":" << row.evaluation_age_ms
+            << ",\"u\":" << row.u << ",\"v\":" << row.v
+            << ",\"crop_x\":" << row.crop_x << ",\"crop_y\":" << row.crop_y << '}';
+    }
     out << "]},\"nr\":\"" << json_escape(dlss_nr_state_name(nr.state)) << "\",\"nr_details\":{"
         << "\"route\":\"" << json_escape(dlss_nr_route_name(nr.route)) << "\",\"candidates\":" << nr.candidate_calls
-        << ",\"evaluations\":" << nr.evaluation_calls << ",\"failures\":" << nr.failed_calls << ",\"result\":" << nr.last_result
+        << ",\"f5_hooked\":" << (nr.f5_hooked ? "true" : "false") << ",\"f5_computed\":" << nr.f5_computed << ",\"f5_reused\":" << nr.f5_reused << ",\"f5_unsupported\":" << nr.f5_unsupported
+        << ",\"evaluations\":" << nr.evaluation_calls << ",\"cache_reuses\":" << nr.cache_reuses << ",\"failures\":" << nr.failed_calls << ",\"result\":" << nr.last_result
+        << ",\"model_gpu_ms\":" << nr.model_gpu_ms << ",\"cache_gpu_ms\":" << nr.cache_gpu_ms
+        << ",\"gpu_timing_samples\":" << nr.gpu_timing_samples << ",\"cache_interval\":" << nr.cache_interval
         << ",\"output_width\":" << nr.output_width << ",\"output_height\":" << nr.output_height
         << ",\"processing_order\":" << static_cast<unsigned>(nr.processing_order)
         << ",\"processing_width\":" << nr.processing_width << ",\"processing_height\":" << nr.processing_height
         << ",\"hdr_input\":" << (nr.hdr_input ? "true" : "false")
+        << ",\"runtime_path\":\"" << json_escape(nr.runtime_path.data()) << "\""
+        << ",\"runtime_version\":\"" << json_escape(nr.runtime_version.data()) << "\""
         << ",\"skip_reason\":\"" << json_escape(nr.skip_reason ? nr.skip_reason : "") << "\""
         << ",\"region_width\":" << nr.region_width << ",\"region_height\":" << nr.region_height
         << ",\"region_x\":" << nr.region_base_x << ",\"region_y\":" << nr.region_base_y
@@ -234,7 +260,8 @@ std::string snapshot_locked(State& s) {
             << ",\"output_width\":" << v.output_width << ",\"output_height\":" << v.output_height
             << ",\"crop_width\":" << v.crop.output_width << ",\"crop_height\":" << v.crop.output_height << '}';
     }
-    out << "],\"view_details_total\":" << details.size() << '}'; return out.str();
+    const auto peripheral_sr=peripheral_sr_diagnostics();
+    out << "],\"peripheral_sr\":{\"evaluations\":" << peripheral_sr.evaluations << ",\"input_width\":" << peripheral_sr.input_width << ",\"input_height\":" << peripheral_sr.input_height << ",\"output_width\":" << peripheral_sr.output_width << ",\"output_height\":" << peripheral_sr.output_height << ",\"quality\":" << peripheral_sr.quality << "},\"view_details_total\":" << details.size() << '}'; return out.str();
 }
 DWORD WINAPI persistence_worker(void*) {
     auto& s = state();
@@ -243,7 +270,7 @@ DWORD WINAPI persistence_worker(void*) {
         try {
             if (s.save_requested.exchange(false)) {
                 Settings settings; std::uint64_t revision;
-                { std::lock_guard lock(s.mutex); settings = configured_settings(); revision = s.revision; }
+                { std::lock_guard lock(s.mutex); settings = s.nr_comparison ? s.nr_comparison_original : configured_settings(); revision = s.revision; }
                 std::string error;
                 const auto success = write_settings_file(s.config, settings, error);
                 std::lock_guard lock(s.mutex);
@@ -404,7 +431,11 @@ extern "C" __declspec(dllexport) bool CheekyRuntime_Start(const CheekyRuntimeSta
         *input->attachment = s.attachment_sequence;
         adapter_attached = true;
         allow_afw_stereo_projection(s.host == CheekyRuntimeHost::uevr);
-        eye_calibration_enable(!configured_settings().manual_stereo_mapping);
+        const bool calibration_on = !configured_settings().manual_stereo_mapping &&
+            GetPrivateProfileIntW(L"Calibration", L"Enabled", 1,
+                (s.directory / L"CheekyRuntime.ini").c_str()) != 0;
+        eye_calibration_enable(calibration_on);
+        trace_event("Calibration startup enabled=%u (CheekyRuntime.ini)", unsigned(calibration_on));
         s.cadence.reset();
         set_processing_allowed(s.graphics_ready);
         request_save(s);
@@ -459,6 +490,10 @@ extern "C" __declspec(dllexport) void CheekyRuntime_Tick(std::uint64_t attachmen
         auto& s = state(); std::lock_guard lock(s.mutex);
         if (!attachment || !adapter_attached.load() || attachment != active_attachment.load()) return;
         configure_graphics(s, renderer, device, queue);
+        if (s.nr_comparison && GetTickCount64() > s.nr_comparison_deadline) {
+            update_settings(s.nr_comparison_original); s.nr_comparison = false;
+            s.message = "NR comparison timed out; original settings restored";
+        }
         if (!s.graphics_ready || renderer != 1) {
             const float empty[2][16]{};
             publish_afw_stereo_projection(empty, 0, 0, false);
@@ -486,14 +521,14 @@ extern "C" __declspec(dllexport) void CheekyRuntime_Tick(std::uint64_t attachmen
         }
         static bool was_down{};
         const bool down = (GetAsyncKeyState(VK_MENU) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) && (GetAsyncKeyState(VK_OEM_2) & 0x8000);
-        if (down && !was_down) {
+        if (down && !was_down && !s.nr_comparison) {
             auto settings = configured_settings(); settings.enabled = !settings.enabled; update_settings(settings); ++s.revision; request_save(s);
         }
         was_down = down;
         static bool nr_was_down{};
         const bool nr_down = (GetAsyncKeyState(VK_MENU) & 0x8000) &&
             (GetAsyncKeyState(VK_SHIFT) & 0x8000) && (GetAsyncKeyState(VK_OEM_PERIOD) & 0x8000);
-        if (nr_down && !nr_was_down) {
+        if (nr_down && !nr_was_down && !s.nr_comparison) {
             auto settings = configured_settings();
             settings.nr_enabled = !settings.nr_enabled;
             update_settings(settings);
@@ -520,6 +555,21 @@ extern "C" __declspec(dllexport) bool CheekyRuntime_Command(std::uint64_t attach
         if (parsed.ec != std::errc{} || parsed.ptr != request.data()+request.size()) return false;
         s.request = id;
         if (action == "get") return true;
+        if (action == "nr_comparison_begin") {
+            if (s.nr_comparison || s.host != CheekyRuntimeHost::standalone) return false;
+            s.nr_comparison_original = configured_settings();
+            s.nr_comparison = true; s.nr_comparison_deadline = GetTickCount64() + 180000;
+            return true;
+        }
+        if (action == "nr_comparison_end") {
+            if (s.nr_comparison) update_settings(s.nr_comparison_original);
+            s.nr_comparison = false; s.message = "NR comparison ended; original settings restored";
+            return true;
+        }
+        if (s.nr_comparison && action != "nr_comparison_set") {
+            s.message = "Finish or cancel NR comparison before changing settings"; return false;
+        }
+        if (action == "nr_comparison_set" && !s.nr_comparison) return false;
         if (action == "calibration_enable" || action == "calibration_disable") {
             eye_calibration_enable(action == "calibration_enable" && !configured_settings().manual_stereo_mapping); return true;
         }
@@ -550,18 +600,23 @@ extern "C" __declspec(dllexport) bool CheekyRuntime_Command(std::uint64_t attach
                 s.message = "Unknown settings group"; return false;
             }
         }
-        else if (action == "set") {
+        else if (action == "set" || action == "nr_comparison_set") {
             std::string line; unsigned count{};
             while (std::getline(in, line)) {
                 if (line.empty()) continue;
                 const auto eq = line.find('=');
+                if (action == "nr_comparison_set") {
+                    const auto key = line.substr(0, eq);
+                    if (key != "NrEnabled" && key != "NrSecondPass" && key != "NrThirdPass" &&
+                        key != "NrColorPipeline" && key != "NrPass2ColorPipeline") return false;
+                }
                 if (line.starts_with("EyeCalibrationLearned")) {
                     s.message = "Learned calibration is read-only; use Reset learned calibration method"; return false;
                 }
                 if (eq == std::string::npos || !set_named_setting(settings, std::string_view(line).substr(0,eq), std::string_view(line).substr(eq+1))) {
                     s.message = "Rejected invalid settings transaction"; return false;
                 }
-                if (++count > 64) { s.message = "Too many settings"; return false; }
+                if (++count > 256) { s.message = "Too many settings"; return false; }
             }
             if (!count) return false;
         } else { s.message = "Unknown command"; return false; }
@@ -569,7 +624,9 @@ extern "C" __declspec(dllexport) bool CheekyRuntime_Command(std::uint64_t attach
         if (was_manual_mapping != settings.manual_stereo_mapping)
             eye_calibration_enable(!settings.manual_stereo_mapping);
         ++s.revision; s.applied_request = id;
-        s.message = "Settings applied"; request_save(s); return true;
+        s.message = "Settings applied";
+        if (action != "nr_comparison_set") request_save(s);
+        return true;
     } catch (...) { return false; }
 }
 extern "C" __declspec(dllexport) bool CheekyUEVR_Command(std::uint64_t attachment, const char* command) {

@@ -1854,22 +1854,26 @@ NgxResult evaluate_d3d12_backend(
     return result;
 }
 
-void release_d3d12_view(const DlssViewId view_id) noexcept {
-    NgxHandle* handle{};
-    D3D12ReleaseFeatureFn release{};
+DetachedD3D12Feature detach_d3d12_feature(const DlssViewId view_id) noexcept {
+    DetachedD3D12Feature detached{};
     {
         std::lock_guard lock(canonical_views_mutex);
         for (auto iterator = canonical_views.begin();
              iterator != canonical_views.end(); ++iterator) {
             if (iterator->view_id != view_id) continue;
-            handle = iterator->private_handle;
-            release = iterator->release_feature;
+            detached.handle = iterator->private_handle;
+            detached.release = iterator->release_feature;
             canonical_views.erase(iterator);
             break;
         }
     }
-    if (handle != nullptr && release != nullptr) {
-        static_cast<void>(release(handle));
+    return detached;
+}
+
+void release_d3d12_view(const DlssViewId view_id) noexcept {
+    const auto detached = detach_d3d12_feature(view_id);
+    if (detached.handle != nullptr && detached.release != nullptr) {
+        static_cast<void>(detached.release(detached.handle));
     }
     release_dlss_nr_view(view_id);
 }

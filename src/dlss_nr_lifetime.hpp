@@ -15,6 +15,7 @@ void nr_recording_submitted(ID3D12CommandQueue*, ID3D12Object*, NrSignal = nullp
 void nr_recording_reset(ID3D12Object*, HRESULT reset_result) noexcept;
 // Whether the list has ever carried a DLSS-NR recording. Private data only, no lock.
 bool nr_recording_tagged(ID3D12Object*) noexcept;
+std::uint64_t nr_recording_token(ID3D12GraphicsCommandList*) noexcept;
 
 // Resources belong to recordings, not their first execution. A use drains only
 // after successful Reset/destruction and completion on every executing queue.
@@ -27,6 +28,7 @@ public:
     [[nodiscard]] std::size_t size() const noexcept { return uses_.size(); }
     [[nodiscard]] std::uint64_t fences_created() const noexcept;
     [[nodiscard]] std::uint64_t fences_released() const noexcept;
+    [[nodiscard]] std::uint64_t timestamp_frequency() const noexcept;
 private:
     std::deque<std::shared_ptr<NrRecording>> uses_;
     std::uint64_t created_{}, released_{};

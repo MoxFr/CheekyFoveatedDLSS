@@ -9,6 +9,12 @@
 
 namespace cheeky::foveated_dlss {
 
+// RenoDX's supported NR selector is Default/A/B, not the SR preset enum.
+// Unknown legacy values fall back to Default rather than silently selecting B.
+constexpr std::uint32_t normalize_nr_preset(std::uint32_t value) noexcept {
+    return value <= 2U ? value : 0U;
+}
+
 // Up to four requested regions (two eyes, fresh and filtered gaze). Bounds
 // are normalized to the complete eye image, independently of the allocation.
 struct FoveationMask {
@@ -20,6 +26,7 @@ enum class FoveationCenterMode : std::uint32_t {
     fixed = 0U,
     openxr_gaze = 1U,
     simulated_gaze = 2U,
+    openxr_gaze_right_eye = 3U, // Explicit unmapped shared-gaze compatibility mode.
 };
 
 enum class NrProcessingOrder : std::uint32_t {
@@ -42,6 +49,10 @@ struct Settings {
     bool d3d12_lower_hook{true}; // Applied at interception startup; changes require a restart.
     bool d3d11_use_d3d12_transport{false};
     bool peripheral_dlaa_enabled{true};
+    bool peripheral_sr_enabled{false}; // full-output SR base; no peripheral DLAA.
+    bool peripheral_fsr1_enabled{false};
+    float peripheral_fsr1_scale{0.3F};
+    float peripheral_sr_scale{1.0F}; // independent SR base downsampling.
     float peripheral_dlaa_scale{0.75F};
     std::uint32_t center_preset{};
     bool fix_motion_blur{false}; // Opt-in DX12 SR center motion-vector copy.
@@ -97,6 +108,13 @@ struct Settings {
     bool nr_enabled{false};
     NrProcessingOrder nr_processing_order{NrProcessingOrder::after_upscaling};
     bool nr_foveated{true};
+    bool nr_edit_cache{false}; // Experimental D3D12 two-frame correction reuse, per eye/pass.
+    bool nr_adaptive_cache{false};
+    bool nr_f5{false}; // Experimental ViT reuse; restart required.
+    float nr_gpu_budget_ms{0.0F}; // Soft model/cache-stage budget, total stereo passes.
+    std::uint32_t nr_cache_max_interval{2U};
+    bool nr_second_pass{false};
+    bool nr_third_pass{false};
     bool nr_use_sr_foveation{false};
     bool nr_alignment_border_enabled{false};
     // Transient final-resolution border for DX11 transport composition.
@@ -108,6 +126,14 @@ struct Settings {
     float nr_working_scale{1.0F};
     std::uint32_t nr_preset{};
     std::uint32_t nr_style{};
+    std::uint32_t nr_reconstruction{}; // 0 legacy, 1 RGB residual
+    std::uint32_t nr_downsample_filter{}; // 0 bilinear, 1 area
+    std::uint32_t nr_upsample_filter{}; // 0 bilinear, 1 bicubic
+    std::uint32_t nr_color_pipeline{0};
+    std::uint32_t nr_signal_encoding{0};
+    std::uint32_t nr_scaling_domain{2};
+    std::uint32_t nr_exposure_mode{0};
+    float nr_exposure_multiplier{1.0F};
     float nr_intensity{1.0F};
     float nr_local_tone_strength{1.0F};
     float nr_local_structure_strength{1.0F};
@@ -121,6 +147,56 @@ struct Settings {
     std::uint32_t nr_depth_convention{};
     float nr_motion_scale_x_multiplier{1.0F};
     float nr_motion_scale_y_multiplier{1.0F};
+
+    // Independent DLSS-NR tuning for passes 2 and 3. Geometry remains shared.
+    // Pass 2
+    float nr_pass2_working_scale{1.0F};
+    std::uint32_t nr_pass2_preset{};
+    std::uint32_t nr_pass2_style{0U};
+    std::uint32_t nr_pass2_reconstruction{}; // 0 legacy, 1 RGB residual
+    std::uint32_t nr_pass2_downsample_filter{}; // 0 bilinear, 1 area
+    std::uint32_t nr_pass2_upsample_filter{}; // 0 bilinear, 1 bicubic
+    std::uint32_t nr_pass2_color_pipeline{0};
+    std::uint32_t nr_pass2_signal_encoding{0};
+    std::uint32_t nr_pass2_scaling_domain{2};
+    std::uint32_t nr_pass2_exposure_mode{0};
+    float nr_pass2_exposure_multiplier{1.0F};
+    float nr_pass2_intensity{1.0F};
+    float nr_pass2_local_tone_strength{1.0F};
+    float nr_pass2_local_structure_strength{1.0F};
+    float nr_pass2_skin_structure_strength{1.0F};
+    bool nr_pass2_automatic_mask{false};
+    bool nr_pass2_ui_correction{false};
+    float nr_pass2_paper_white_scale{1.0F};
+    float nr_pass2_hdr_transfer_strength{1.0F};
+    float nr_pass2_color_strength{1.0F};
+    std::uint32_t nr_pass2_depth_convention{0U};
+    float nr_pass2_motion_scale_x_multiplier{1.0F};
+    float nr_pass2_motion_scale_y_multiplier{1.0F};
+    // Pass 3
+    float nr_pass3_working_scale{1.0F};
+    std::uint32_t nr_pass3_preset{};
+    std::uint32_t nr_pass3_style{0U};
+    std::uint32_t nr_pass3_reconstruction{}; // 0 legacy, 1 RGB residual
+    std::uint32_t nr_pass3_downsample_filter{}; // 0 bilinear, 1 area
+    std::uint32_t nr_pass3_upsample_filter{}; // 0 bilinear, 1 bicubic
+    std::uint32_t nr_pass3_color_pipeline{0};
+    std::uint32_t nr_pass3_signal_encoding{0};
+    std::uint32_t nr_pass3_scaling_domain{2};
+    std::uint32_t nr_pass3_exposure_mode{0};
+    float nr_pass3_exposure_multiplier{1.0F};
+    float nr_pass3_intensity{1.0F};
+    float nr_pass3_local_tone_strength{1.0F};
+    float nr_pass3_local_structure_strength{1.0F};
+    float nr_pass3_skin_structure_strength{1.0F};
+    bool nr_pass3_automatic_mask{false};
+    bool nr_pass3_ui_correction{false};
+    float nr_pass3_paper_white_scale{1.0F};
+    float nr_pass3_hdr_transfer_strength{1.0F};
+    float nr_pass3_color_strength{1.0F};
+    std::uint32_t nr_pass3_depth_convention{0U};
+    float nr_pass3_motion_scale_x_multiplier{1.0F};
+    float nr_pass3_motion_scale_y_multiplier{1.0F};
 };
 
 inline bool uses_coordinated_center(const Settings& settings) noexcept {

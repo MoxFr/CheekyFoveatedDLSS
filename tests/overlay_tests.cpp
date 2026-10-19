@@ -146,6 +146,17 @@ void test_ui_diagnostics() {
     require(render("Stereo / Gaze").find("manual fallback placement") == std::string::npos, "Flat games do not require stereo alignment");
     state.draft.center_mode = FoveationCenterMode::openxr_gaze;
     state.snapshot = R"({"gaze":{"layer":false,"views":2,"alignment":1}})";
+    state.draft.center_mode = FoveationCenterMode::openxr_gaze_right_eye;
+    state.snapshot = R"({"gaze":{"layer":true,"abi":true,"status_flags":127,"alignment":1,"shared_projection":true,"shared_fresh":true,"shared_recent_views":2,"shared_tracking_views":1}})";
+    text = render("Stereo / Gaze");
+    require(text.find("not tracking BOTH") != text.npos && text.find("1 / 2 recent render views") != text.npos,
+        "Last-view success must not hide the static second view");
+    state.snapshot = R"({"gaze":{"layer":true,"abi":true,"status_flags":127,"alignment":1,"shared_projection":true,"shared_fresh":true,"shared_recent_views":2,"shared_tracking_views":2}})";
+    text = render("Stereo / Gaze");
+    require(text.find("Eye Tracking Ready: Yes") != text.npos && text.find("2 / 2 recent render views") != text.npos,
+        "Both-view shared gaze readiness is visible");
+    state.draft.center_mode = FoveationCenterMode::openxr_gaze;
+    state.snapshot = R"({"gaze":{"layer":false,"views":2,"alignment":1}})";
     text = render("Stereo / Gaze");
     require(text.find("manual fallback placement") == text.npos, "Streamline alignment does not need eye tracking");
     state.snapshot = R"({"gaze":{"layer":true,"abi":false,"views":2,"alignment":0}})";

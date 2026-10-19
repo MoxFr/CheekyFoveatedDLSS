@@ -18,6 +18,10 @@ std::atomic<bool> enabled{true};
 std::atomic<bool> d3d12_lower_hook{true};
 std::atomic<bool> d3d11_use_d3d12_transport{false};
 std::atomic<bool> peripheral_dlaa_enabled{true};
+std::atomic<bool> peripheral_fsr1_enabled{false};
+std::atomic<std::uint32_t> peripheral_fsr1_scale_bits{0x3E99999AU};
+std::atomic<bool> peripheral_sr_enabled{false};
+std::atomic<std::uint32_t> peripheral_sr_scale_bits{0x3F800000U};
 std::atomic<std::uint32_t> peripheral_dlaa_scale_bits{0x3F400000U};
 std::atomic<std::uint32_t> center_preset{};
 std::atomic<bool> fix_motion_blur{};
@@ -56,6 +60,13 @@ std::atomic<std::uint32_t> gaze_jump_reset_ratio_bits{0x3E000000U};
 std::atomic<bool> nr_enabled{false};
 std::atomic<NrProcessingOrder> nr_order{NrProcessingOrder::after_upscaling};
 std::atomic<bool> nr_foveated{true};
+std::atomic<bool> nr_edit_cache{false};
+std::atomic<bool> nr_adaptive_cache{false};
+std::atomic<bool> nr_f5{false};
+std::atomic<float> nr_gpu_budget_ms{0.F};
+std::atomic<std::uint32_t> nr_cache_max_interval{2U};
+std::atomic<bool> nr_second_pass{false};
+std::atomic<bool> nr_third_pass{false};
 std::atomic<bool> nr_use_sr_foveation{false};
 std::atomic<bool> nr_alignment_border_enabled{false};
 std::atomic<std::uint32_t> nr_width_bits{0x3F0F5C29U};
@@ -65,6 +76,14 @@ std::atomic<std::uint32_t> nr_transition_bits{0x3DA3D70AU};
 std::atomic<std::uint32_t> nr_working_scale_bits{0x3F800000U};
 std::atomic<std::uint32_t> nr_preset{};
 std::atomic<std::uint32_t> nr_style{};
+std::atomic<std::uint32_t> nr_reconstruction{};
+std::atomic<std::uint32_t> nr_downsample_filter{};
+std::atomic<std::uint32_t> nr_upsample_filter{};
+std::atomic<std::uint32_t> nr_color_pipeline{0};
+std::atomic<std::uint32_t> nr_signal_encoding{0};
+std::atomic<std::uint32_t> nr_scaling_domain{2};
+std::atomic<std::uint32_t> nr_exposure_mode{0};
+std::atomic<float> nr_exposure_multiplier{1.0F};
 std::atomic<std::uint32_t> nr_intensity_bits{0x3F800000U};
 std::atomic<std::uint32_t> nr_local_tone_bits{0x3F800000U};
 std::atomic<std::uint32_t> nr_local_structure_bits{0x3F800000U};
@@ -77,6 +96,54 @@ std::atomic<std::uint32_t> nr_color_strength_bits{0x3F800000U};
 std::atomic<std::uint32_t> nr_depth_convention{};
 std::atomic<std::uint32_t> nr_motion_scale_x_bits{0x3F800000U};
 std::atomic<std::uint32_t> nr_motion_scale_y_bits{0x3F800000U};
+
+// Independent pass 2/3 DLSS-NR tuning.
+std::atomic<std::uint32_t> nr_pass2_working_scale_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass2_preset{};
+std::atomic<std::uint32_t> nr_pass2_style{};
+std::atomic<std::uint32_t> nr_pass2_reconstruction{};
+std::atomic<std::uint32_t> nr_pass2_downsample_filter{};
+std::atomic<std::uint32_t> nr_pass2_upsample_filter{};
+std::atomic<std::uint32_t> nr_pass2_color_pipeline{0};
+std::atomic<std::uint32_t> nr_pass2_signal_encoding{0};
+std::atomic<std::uint32_t> nr_pass2_scaling_domain{2};
+std::atomic<std::uint32_t> nr_pass2_exposure_mode{0};
+std::atomic<float> nr_pass2_exposure_multiplier{1.0F};
+std::atomic<std::uint32_t> nr_pass2_intensity_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass2_local_tone_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass2_local_structure_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass2_skin_structure_bits{0x3F800000U};
+std::atomic<bool> nr_pass2_automatic_mask{false};
+std::atomic<bool> nr_pass2_ui_correction{false};
+std::atomic<std::uint32_t> nr_pass2_paper_white_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass2_hdr_transfer_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass2_color_strength_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass2_depth_convention{};
+std::atomic<std::uint32_t> nr_pass2_motion_scale_x_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass2_motion_scale_y_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass3_working_scale_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass3_preset{};
+std::atomic<std::uint32_t> nr_pass3_style{};
+std::atomic<std::uint32_t> nr_pass3_reconstruction{};
+std::atomic<std::uint32_t> nr_pass3_downsample_filter{};
+std::atomic<std::uint32_t> nr_pass3_upsample_filter{};
+std::atomic<std::uint32_t> nr_pass3_color_pipeline{0};
+std::atomic<std::uint32_t> nr_pass3_signal_encoding{0};
+std::atomic<std::uint32_t> nr_pass3_scaling_domain{2};
+std::atomic<std::uint32_t> nr_pass3_exposure_mode{0};
+std::atomic<float> nr_pass3_exposure_multiplier{1.0F};
+std::atomic<std::uint32_t> nr_pass3_intensity_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass3_local_tone_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass3_local_structure_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass3_skin_structure_bits{0x3F800000U};
+std::atomic<bool> nr_pass3_automatic_mask{false};
+std::atomic<bool> nr_pass3_ui_correction{false};
+std::atomic<std::uint32_t> nr_pass3_paper_white_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass3_hdr_transfer_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass3_color_strength_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass3_depth_convention{};
+std::atomic<std::uint32_t> nr_pass3_motion_scale_x_bits{0x3F800000U};
+std::atomic<std::uint32_t> nr_pass3_motion_scale_y_bits{0x3F800000U};
 
 struct StereoView {
     std::uint64_t view_id{};
@@ -154,6 +221,10 @@ Settings configured_settings() noexcept {
     settings.d3d12_lower_hook = d3d12_lower_hook.load(std::memory_order_acquire);
     settings.d3d11_use_d3d12_transport =
         d3d11_use_d3d12_transport.load(std::memory_order_acquire);
+    settings.peripheral_fsr1_enabled=peripheral_fsr1_enabled.load(std::memory_order_acquire);
+    settings.peripheral_fsr1_scale=load_float(peripheral_fsr1_scale_bits);
+    settings.peripheral_sr_enabled=peripheral_sr_enabled.load(std::memory_order_acquire);
+    settings.peripheral_sr_scale=load_float(peripheral_sr_scale_bits);
     settings.peripheral_dlaa_enabled =
         peripheral_dlaa_enabled.load(std::memory_order_acquire);
     settings.peripheral_dlaa_scale = load_float(peripheral_dlaa_scale_bits);
@@ -204,6 +275,13 @@ Settings configured_settings() noexcept {
     settings.nr_processing_order = nr_order.load(std::memory_order_acquire);
     settings.nr_enabled = nr_enabled.load(std::memory_order_acquire);
     settings.nr_foveated = nr_foveated.load(std::memory_order_acquire);
+    settings.nr_edit_cache = nr_edit_cache.load(std::memory_order_acquire);
+    settings.nr_adaptive_cache = nr_adaptive_cache.load(std::memory_order_acquire);
+    settings.nr_f5 = nr_f5.load(std::memory_order_acquire);
+    settings.nr_gpu_budget_ms = nr_gpu_budget_ms.load(std::memory_order_acquire);
+    settings.nr_cache_max_interval = nr_cache_max_interval.load(std::memory_order_acquire);
+    settings.nr_second_pass = nr_second_pass.load(std::memory_order_acquire);
+    settings.nr_third_pass = nr_third_pass.load(std::memory_order_acquire);
     settings.nr_use_sr_foveation =
         nr_use_sr_foveation.load(std::memory_order_acquire);
     settings.nr_alignment_border_enabled =
@@ -215,6 +293,14 @@ Settings configured_settings() noexcept {
     settings.nr_working_scale = load_float(nr_working_scale_bits);
     settings.nr_preset = nr_preset.load(std::memory_order_acquire);
     settings.nr_style = nr_style.load(std::memory_order_acquire);
+    settings.nr_reconstruction = nr_reconstruction.load(std::memory_order_acquire);
+    settings.nr_downsample_filter = nr_downsample_filter.load(std::memory_order_acquire);
+    settings.nr_upsample_filter = nr_upsample_filter.load(std::memory_order_acquire);
+    settings.nr_color_pipeline = nr_color_pipeline.load(std::memory_order_acquire);
+    settings.nr_signal_encoding = nr_signal_encoding.load(std::memory_order_acquire);
+    settings.nr_scaling_domain = nr_scaling_domain.load(std::memory_order_acquire);
+    settings.nr_exposure_mode = nr_exposure_mode.load(std::memory_order_acquire);
+    settings.nr_exposure_multiplier = nr_exposure_multiplier.load(std::memory_order_acquire);
     settings.nr_intensity = load_float(nr_intensity_bits);
     settings.nr_local_tone_strength = load_float(nr_local_tone_bits);
     settings.nr_local_structure_strength = load_float(nr_local_structure_bits);
@@ -228,6 +314,52 @@ Settings configured_settings() noexcept {
         nr_depth_convention.load(std::memory_order_acquire);
     settings.nr_motion_scale_x_multiplier = load_float(nr_motion_scale_x_bits);
     settings.nr_motion_scale_y_multiplier = load_float(nr_motion_scale_y_bits);
+    settings.nr_pass2_working_scale = load_float(nr_pass2_working_scale_bits);
+    settings.nr_pass2_preset = nr_pass2_preset.load(std::memory_order_acquire);
+    settings.nr_pass2_style = nr_pass2_style.load(std::memory_order_acquire);
+    settings.nr_pass2_reconstruction = nr_pass2_reconstruction.load(std::memory_order_acquire);
+    settings.nr_pass2_downsample_filter = nr_pass2_downsample_filter.load(std::memory_order_acquire);
+    settings.nr_pass2_upsample_filter = nr_pass2_upsample_filter.load(std::memory_order_acquire);
+    settings.nr_pass2_color_pipeline = nr_pass2_color_pipeline.load(std::memory_order_acquire);
+    settings.nr_pass2_signal_encoding = nr_pass2_signal_encoding.load(std::memory_order_acquire);
+    settings.nr_pass2_scaling_domain = nr_pass2_scaling_domain.load(std::memory_order_acquire);
+    settings.nr_pass2_exposure_mode = nr_pass2_exposure_mode.load(std::memory_order_acquire);
+    settings.nr_pass2_exposure_multiplier = nr_pass2_exposure_multiplier.load(std::memory_order_acquire);
+    settings.nr_pass2_intensity = load_float(nr_pass2_intensity_bits);
+    settings.nr_pass2_local_tone_strength = load_float(nr_pass2_local_tone_bits);
+    settings.nr_pass2_local_structure_strength = load_float(nr_pass2_local_structure_bits);
+    settings.nr_pass2_skin_structure_strength = load_float(nr_pass2_skin_structure_bits);
+    settings.nr_pass2_automatic_mask = nr_pass2_automatic_mask.load(std::memory_order_acquire);
+    settings.nr_pass2_ui_correction = nr_pass2_ui_correction.load(std::memory_order_acquire);
+    settings.nr_pass2_paper_white_scale = load_float(nr_pass2_paper_white_bits);
+    settings.nr_pass2_hdr_transfer_strength = load_float(nr_pass2_hdr_transfer_bits);
+    settings.nr_pass2_color_strength = load_float(nr_pass2_color_strength_bits);
+    settings.nr_pass2_depth_convention = nr_pass2_depth_convention.load(std::memory_order_acquire);
+    settings.nr_pass2_motion_scale_x_multiplier = load_float(nr_pass2_motion_scale_x_bits);
+    settings.nr_pass2_motion_scale_y_multiplier = load_float(nr_pass2_motion_scale_y_bits);
+    settings.nr_pass3_working_scale = load_float(nr_pass3_working_scale_bits);
+    settings.nr_pass3_preset = nr_pass3_preset.load(std::memory_order_acquire);
+    settings.nr_pass3_style = nr_pass3_style.load(std::memory_order_acquire);
+    settings.nr_pass3_reconstruction = nr_pass3_reconstruction.load(std::memory_order_acquire);
+    settings.nr_pass3_downsample_filter = nr_pass3_downsample_filter.load(std::memory_order_acquire);
+    settings.nr_pass3_upsample_filter = nr_pass3_upsample_filter.load(std::memory_order_acquire);
+    settings.nr_pass3_color_pipeline = nr_pass3_color_pipeline.load(std::memory_order_acquire);
+    settings.nr_pass3_signal_encoding = nr_pass3_signal_encoding.load(std::memory_order_acquire);
+    settings.nr_pass3_scaling_domain = nr_pass3_scaling_domain.load(std::memory_order_acquire);
+    settings.nr_pass3_exposure_mode = nr_pass3_exposure_mode.load(std::memory_order_acquire);
+    settings.nr_pass3_exposure_multiplier = nr_pass3_exposure_multiplier.load(std::memory_order_acquire);
+    settings.nr_pass3_intensity = load_float(nr_pass3_intensity_bits);
+    settings.nr_pass3_local_tone_strength = load_float(nr_pass3_local_tone_bits);
+    settings.nr_pass3_local_structure_strength = load_float(nr_pass3_local_structure_bits);
+    settings.nr_pass3_skin_structure_strength = load_float(nr_pass3_skin_structure_bits);
+    settings.nr_pass3_automatic_mask = nr_pass3_automatic_mask.load(std::memory_order_acquire);
+    settings.nr_pass3_ui_correction = nr_pass3_ui_correction.load(std::memory_order_acquire);
+    settings.nr_pass3_paper_white_scale = load_float(nr_pass3_paper_white_bits);
+    settings.nr_pass3_hdr_transfer_strength = load_float(nr_pass3_hdr_transfer_bits);
+    settings.nr_pass3_color_strength = load_float(nr_pass3_color_strength_bits);
+    settings.nr_pass3_depth_convention = nr_pass3_depth_convention.load(std::memory_order_acquire);
+    settings.nr_pass3_motion_scale_x_multiplier = load_float(nr_pass3_motion_scale_x_bits);
+    settings.nr_pass3_motion_scale_y_multiplier = load_float(nr_pass3_motion_scale_y_bits);
     return settings;
 }
 
@@ -248,6 +380,10 @@ void update_settings(const Settings& settings) noexcept {
         settings.d3d11_use_d3d12_transport,
         std::memory_order_release
     );
+    peripheral_fsr1_enabled.store(settings.peripheral_fsr1_enabled,std::memory_order_release);
+    store_float(peripheral_fsr1_scale_bits,std::isfinite(settings.peripheral_fsr1_scale)?std::clamp(settings.peripheral_fsr1_scale,0.3F,0.5F):0.3F);
+    peripheral_sr_enabled.store(settings.peripheral_sr_enabled,std::memory_order_release);
+    store_float(peripheral_sr_scale_bits,std::isfinite(settings.peripheral_sr_scale)?std::clamp(settings.peripheral_sr_scale,0.5F,1.0F):1.0F);
     peripheral_dlaa_enabled.store(
         settings.peripheral_dlaa_enabled,
         std::memory_order_release
@@ -306,7 +442,7 @@ void update_settings(const Settings& settings) noexcept {
     calibration_method.store(unsigned(settings.eye_calibration_method) <= 3 ? unsigned(settings.eye_calibration_method) : 0);
     store_float(aligned_height_offset_bits, std::clamp(settings.aligned_height_offset, -1.0F, 1.0F));
     center_mode.store(
-        static_cast<std::uint32_t>(settings.center_mode) <= 2U
+        static_cast<std::uint32_t>(settings.center_mode) <= 3U
             ? static_cast<std::uint32_t>(settings.center_mode)
             : 0U,
         std::memory_order_release
@@ -335,6 +471,13 @@ void update_settings(const Settings& settings) noexcept {
     nr_order.store(nr_processing_order(static_cast<std::uint32_t>(settings.nr_processing_order)), std::memory_order_release);
     nr_enabled.store(settings.nr_enabled, std::memory_order_release);
     nr_foveated.store(settings.nr_foveated, std::memory_order_release);
+    nr_edit_cache.store(settings.nr_edit_cache, std::memory_order_release);
+    nr_adaptive_cache.store(settings.nr_adaptive_cache, std::memory_order_release);
+    nr_f5.store(settings.nr_f5, std::memory_order_release);
+    nr_gpu_budget_ms.store(std::clamp(settings.nr_gpu_budget_ms,0.F,20.F),std::memory_order_release);
+    nr_cache_max_interval.store(std::clamp(settings.nr_cache_max_interval,2U,4U),std::memory_order_release);
+    nr_second_pass.store(settings.nr_second_pass, std::memory_order_release);
+    nr_third_pass.store(settings.nr_third_pass, std::memory_order_release);
     nr_use_sr_foveation.store(
         settings.nr_use_sr_foveation,
         std::memory_order_release
@@ -357,8 +500,16 @@ void update_settings(const Settings& settings) noexcept {
         nr_working_scale_bits,
         std::clamp(settings.nr_working_scale, 0.10F, 1.0F)
     );
-    nr_preset.store((std::min)(settings.nr_preset, 7U), std::memory_order_release);
+    nr_preset.store(normalize_nr_preset(settings.nr_preset), std::memory_order_release);
     nr_style.store((std::min)(settings.nr_style, 2U), std::memory_order_release);
+    nr_reconstruction.store(settings.nr_reconstruction == 1U ? 1U : 0U, std::memory_order_release);
+    nr_downsample_filter.store(settings.nr_downsample_filter == 1U ? 1U : 0U, std::memory_order_release);
+    nr_upsample_filter.store(settings.nr_upsample_filter == 1U ? 1U : 0U, std::memory_order_release);
+    nr_color_pipeline.store(settings.nr_color_pipeline <= 2U ? settings.nr_color_pipeline : 0U, std::memory_order_release);
+    nr_signal_encoding.store(settings.nr_signal_encoding <= 2U ? settings.nr_signal_encoding : 0U, std::memory_order_release);
+    nr_scaling_domain.store(settings.nr_scaling_domain <= 2U ? settings.nr_scaling_domain : 2U, std::memory_order_release);
+    nr_exposure_mode.store(settings.nr_exposure_mode <= 2U ? settings.nr_exposure_mode : 0U, std::memory_order_release);
+    nr_exposure_multiplier.store(std::isfinite(settings.nr_exposure_multiplier) ? std::clamp(settings.nr_exposure_multiplier, 0.01F, 10.0F) : 1.0F, std::memory_order_release);
     // NR 310.8 saturates the final model blend at one. Accept legacy saved
     // values above one, but expose the effective value to both integrations.
     store_float(nr_intensity_bits, std::clamp(settings.nr_intensity, 0.0F, 1.0F));
@@ -400,6 +551,52 @@ void update_settings(const Settings& settings) noexcept {
         nr_motion_scale_y_bits,
         std::clamp(settings.nr_motion_scale_y_multiplier, -4.0F, 4.0F)
     );
+    store_float(nr_pass2_working_scale_bits, std::clamp(settings.nr_pass2_working_scale, 0.10F, 1.0F));
+    nr_pass2_preset.store(normalize_nr_preset(settings.nr_pass2_preset), std::memory_order_release);
+    nr_pass2_style.store((std::min)(settings.nr_pass2_style, 2U), std::memory_order_release);
+    nr_pass2_reconstruction.store(settings.nr_pass2_reconstruction == 1U ? 1U : 0U, std::memory_order_release);
+    nr_pass2_downsample_filter.store(settings.nr_pass2_downsample_filter == 1U ? 1U : 0U, std::memory_order_release);
+    nr_pass2_upsample_filter.store(settings.nr_pass2_upsample_filter == 1U ? 1U : 0U, std::memory_order_release);
+    nr_pass2_color_pipeline.store(settings.nr_pass2_color_pipeline <= 2U ? settings.nr_pass2_color_pipeline : 0U, std::memory_order_release);
+    nr_pass2_signal_encoding.store(settings.nr_pass2_signal_encoding <= 2U ? settings.nr_pass2_signal_encoding : 0U, std::memory_order_release);
+    nr_pass2_scaling_domain.store(settings.nr_pass2_scaling_domain <= 2U ? settings.nr_pass2_scaling_domain : 2U, std::memory_order_release);
+    nr_pass2_exposure_mode.store(settings.nr_pass2_exposure_mode <= 2U ? settings.nr_pass2_exposure_mode : 0U, std::memory_order_release);
+    nr_pass2_exposure_multiplier.store(std::isfinite(settings.nr_pass2_exposure_multiplier) ? std::clamp(settings.nr_pass2_exposure_multiplier, 0.01F, 10.0F) : 1.0F, std::memory_order_release);
+    store_float(nr_pass2_intensity_bits, std::clamp(settings.nr_pass2_intensity, 0.0F, 1.0F));
+    store_float(nr_pass2_local_tone_bits, std::clamp(settings.nr_pass2_local_tone_strength, 0.0F, 2.0F));
+    store_float(nr_pass2_local_structure_bits, std::clamp(settings.nr_pass2_local_structure_strength, 0.0F, 2.0F));
+    store_float(nr_pass2_skin_structure_bits, std::clamp(settings.nr_pass2_skin_structure_strength, 0.0F, 2.0F));
+    nr_pass2_automatic_mask.store(settings.nr_pass2_automatic_mask, std::memory_order_release);
+    nr_pass2_ui_correction.store(settings.nr_pass2_ui_correction, std::memory_order_release);
+    store_float(nr_pass2_paper_white_bits, std::clamp(settings.nr_pass2_paper_white_scale, 0.01F, 8.0F));
+    store_float(nr_pass2_hdr_transfer_bits, std::clamp(settings.nr_pass2_hdr_transfer_strength, 0.0F, 2.0F));
+    store_float(nr_pass2_color_strength_bits, std::clamp(settings.nr_pass2_color_strength, 0.0F, 2.0F));
+    nr_pass2_depth_convention.store((std::min)(settings.nr_pass2_depth_convention, 2U), std::memory_order_release);
+    store_float(nr_pass2_motion_scale_x_bits, std::clamp(settings.nr_pass2_motion_scale_x_multiplier, -4.0F, 4.0F));
+    store_float(nr_pass2_motion_scale_y_bits, std::clamp(settings.nr_pass2_motion_scale_y_multiplier, -4.0F, 4.0F));
+    store_float(nr_pass3_working_scale_bits, std::clamp(settings.nr_pass3_working_scale, 0.10F, 1.0F));
+    nr_pass3_preset.store(normalize_nr_preset(settings.nr_pass3_preset), std::memory_order_release);
+    nr_pass3_style.store((std::min)(settings.nr_pass3_style, 2U), std::memory_order_release);
+    nr_pass3_reconstruction.store(settings.nr_pass3_reconstruction == 1U ? 1U : 0U, std::memory_order_release);
+    nr_pass3_downsample_filter.store(settings.nr_pass3_downsample_filter == 1U ? 1U : 0U, std::memory_order_release);
+    nr_pass3_upsample_filter.store(settings.nr_pass3_upsample_filter == 1U ? 1U : 0U, std::memory_order_release);
+    nr_pass3_color_pipeline.store(settings.nr_pass3_color_pipeline <= 2U ? settings.nr_pass3_color_pipeline : 0U, std::memory_order_release);
+    nr_pass3_signal_encoding.store(settings.nr_pass3_signal_encoding <= 2U ? settings.nr_pass3_signal_encoding : 0U, std::memory_order_release);
+    nr_pass3_scaling_domain.store(settings.nr_pass3_scaling_domain <= 2U ? settings.nr_pass3_scaling_domain : 2U, std::memory_order_release);
+    nr_pass3_exposure_mode.store(settings.nr_pass3_exposure_mode <= 2U ? settings.nr_pass3_exposure_mode : 0U, std::memory_order_release);
+    nr_pass3_exposure_multiplier.store(std::isfinite(settings.nr_pass3_exposure_multiplier) ? std::clamp(settings.nr_pass3_exposure_multiplier, 0.01F, 10.0F) : 1.0F, std::memory_order_release);
+    store_float(nr_pass3_intensity_bits, std::clamp(settings.nr_pass3_intensity, 0.0F, 1.0F));
+    store_float(nr_pass3_local_tone_bits, std::clamp(settings.nr_pass3_local_tone_strength, 0.0F, 2.0F));
+    store_float(nr_pass3_local_structure_bits, std::clamp(settings.nr_pass3_local_structure_strength, 0.0F, 2.0F));
+    store_float(nr_pass3_skin_structure_bits, std::clamp(settings.nr_pass3_skin_structure_strength, 0.0F, 2.0F));
+    nr_pass3_automatic_mask.store(settings.nr_pass3_automatic_mask, std::memory_order_release);
+    nr_pass3_ui_correction.store(settings.nr_pass3_ui_correction, std::memory_order_release);
+    store_float(nr_pass3_paper_white_bits, std::clamp(settings.nr_pass3_paper_white_scale, 0.01F, 8.0F));
+    store_float(nr_pass3_hdr_transfer_bits, std::clamp(settings.nr_pass3_hdr_transfer_strength, 0.0F, 2.0F));
+    store_float(nr_pass3_color_strength_bits, std::clamp(settings.nr_pass3_color_strength, 0.0F, 2.0F));
+    nr_pass3_depth_convention.store((std::min)(settings.nr_pass3_depth_convention, 2U), std::memory_order_release);
+    store_float(nr_pass3_motion_scale_x_bits, std::clamp(settings.nr_pass3_motion_scale_x_multiplier, -4.0F, 4.0F));
+    store_float(nr_pass3_motion_scale_y_bits, std::clamp(settings.nr_pass3_motion_scale_y_multiplier, -4.0F, 4.0F));
 }
 
 void set_processing_allowed(bool allowed) noexcept {

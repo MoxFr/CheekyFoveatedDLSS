@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <cstdio>
 #include <cmath>
+#include <limits>
 #include <DirectXPackedVector.h>
 using namespace cheeky::foveated_dlss;
 using Microsoft::WRL::ComPtr;
@@ -39,6 +40,7 @@ void observe_nr_handle(const NgxHandle* handle, const NgxParameters*) { nr_last_
 float nr_motion_x{};
 unsigned nr_motion_width{};
 ComPtr<ID3D12Resource> nr_motion_resource;
+ID3D12Resource* nr_color_resource{};
 MockNgxParameters nr_created;
 void observe_nr_created(const NgxParameters* params) {
     nr_created.values = static_cast<const MockNgxParameters*>(params)->values;
@@ -53,6 +55,7 @@ void observe_sr(const NgxParameters* params) {
 void observe_nr(const NgxParameters* params) {
     evaluation_order += 'N';
     params->Get("DLSSNR.Reset", &nr_reset);
+    params->Get("DLSSNR.Color", &nr_color_resource);
     params->Get("DLSSNR.MVecScaleX", &nr_motion_x);
     params->Get("DLSSNR.MVecSubrectWidth", &nr_motion_width);
     ID3D12Resource* mv{}; params->Get("DLSSNR.MVec", &mv); nr_motion_resource=mv;
@@ -83,6 +86,8 @@ struct Fixture {
     std::array<SlResource, 4> resources{};
     std::array<SlResourceTag, 4> tags{};
     bool test_exposure_present{};
+    ID3D12Resource* nr_test_exposure{};
+    bool nr_test_exposure_override{};
     void submit_metadata() {
         if (!complete_sl_metadata) return;
         const unsigned types[]{3U, 0U, 1U, 4U};
@@ -101,8 +106,9 @@ struct Fixture {
         constants.reset = static_cast<char>(get_ui(&params, "Reset"));
         require(proc<unsigned(*)(const void*,const void*,const void*,unsigned,void*)>(sl,"slSetTagForFrame")(
             &frame,&viewport,tags.data(),4,list.Get()) == 0, "Submit complete viewport tags");
-        if (test_exposure_present) {
+        if (test_exposure_present || nr_test_exposure_override) {
             auto exposure = resources[0];
+            if (nr_test_exposure_override) exposure.native=nr_test_exposure;
             auto tag = tags[0]; tag.type = 13; tag.resource = &exposure;
             tag.extent = {0,0,1,1};
             require(proc<unsigned(*)(const void*,const void*,const void*,unsigned,void*)>(sl,"slSetTagForFrame")(
@@ -574,9 +580,45 @@ void verify_nr_reset_isolation(void (*command)(const char*), bool lower_hook) {
     transition_resource(color_dst.pResource,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
     f.list->CopyTextureRegion(&color_dst,0,0,0,&color_src,nullptr);
     transition_resource(color_dst.pResource,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    for (float white : {0.25F, 1.F, 4.F}) for (float scale : {1.F, 0.5F})
+    // Exercise the real runtime orchestration and recording/fence lifetimes,
+    // with a fake identity NVIDIA model and three independent NR passes.
+    command("1\n900\nset\nNrEditCache=true\nNrFoveated=true\nNrWidth=1\nNrHeight=1\nNrSecondPass=true\nNrThirdPass=true\nNrWorkingScale=1\nNrPass2WorkingScale=1\nNrPass3WorkingScale=1");
+    evaluate(1);
+    require(std::count(evaluation_order.begin(),evaluation_order.end(),'N')==3,"Cache warmup lost a multipass model evaluation");
+    evaluate(0);
+    require(std::count(evaluation_order.begin(),evaluation_order.end(),'N')==0,"Warm cache did not skip all three model passes");
+    evaluate(0);
+    require(std::count(evaluation_order.begin(),evaluation_order.end(),'N')==3,"Cache reused history beyond one skipped frame");
+    evaluate(1);
+    require(std::count(evaluation_order.begin(),evaluation_order.end(),'N')==3,"Explicit reset did not invalidate every NR pass");
+    command("1\n902\nset\nNrWidth=0.5\nNrHeight=0.5\nHeightOffset=0");
+    evaluate(1);
+    command("1\n903\nset\nHeightOffset=0.1");
+    evaluate(0);
+    require(std::count(evaluation_order.begin(),evaluation_order.end(),'N')==0,"Overlapping gaze movement unnecessarily reran the three model passes");
+    command("1\n904\nset\nNrAdaptiveCache=true\nNrGpuBudgetMs=0.01\nNrCacheMaxInterval=4");
+    evaluate(1);
+    bool previous_reused=false,consecutive_reuses=false;
+    for(unsigned i=0;i<12;++i){evaluate(0);const bool reused_now=std::count(evaluation_order.begin(),evaluation_order.end(),'N')==0;consecutive_reuses|=previous_reused&&reused_now;previous_reused=reused_now;}
+    require(consecutive_reuses,"Measured GPU budget never extended reuse beyond every other frame");
+    command("1\n905\nset\nNrAdaptiveCache=false\nNrGpuBudgetMs=0\nNrCacheMaxInterval=2");
+    command("1\n901\nset\nNrEditCache=false\nNrFoveated=false\nNrSecondPass=false\nNrThirdPass=false");
+    evaluate(0);evaluate(0);
+    require(std::count(evaluation_order.begin(),evaluation_order.end(),'N')==1,"Disabled cache continued skipping the model");
+    puts("PASS: production NR edit cache, three-pass warm/reuse/refresh/reset/disable");
+    if(GetEnvironmentVariableW(L"CHEEKY_TEST_CACHE_ONLY",nullptr,0))return;
+    for (unsigned flags : {2U, 3U})
+    for (unsigned reconstruction : {0U, 1U})
+    for (unsigned filters : {0U, 1U, 2U, 3U})
+    for (float white : {0.25F, 1.F, 4.F}) for (float scale : {1.F, 0.5F, 0.3F, 0.1F})
     for (float transfer : {0.F, 0.5F, 1.F, 2.F}) {
+        if (flags == 3U && reconstruction == 0U) continue; // Legacy HDR has luminance-based restoration.
+        if (reconstruction == 0U && scale != 1.F && scale != 0.5F) continue;
+        f.params.Set("DLSS.Feature.Create.Flags", flags);
         command((std::string("1\n96\nset\nNrPaperWhiteScale=") + std::to_string(white) +
+            "\nNrReconstruction=" + std::to_string(reconstruction) +
+            "\nNrDownsampleFilter=" + std::to_string(filters & 1U) +
+            "\nNrUpsampleFilter=" + std::to_string((filters >> 1U) & 1U) +
             "\nNrWorkingScale=" + std::to_string(scale) +
             "\nNrHdrTransferStrength=" + std::to_string(transfer)).c_str()); evaluate(0);
         require(sr_inputs.size() == 1 && sr_inputs[0].color != f.textures12[0].Get(), "Color round trip did not execute NR");
@@ -593,7 +635,7 @@ void verify_nr_reset_isolation(void (*command)(const char*), bool lower_hook) {
         transition_resource(from.pResource,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         f.finish_gpu(); check(readback->Map(0,nullptr,&mapped), "Map NR color result");
         const auto* result = static_cast<const DirectX::PackedVector::HALF*>(mapped);
-        const float expected_edge = scale == 1.F ? 0.F : transfer*0.5F/128.F;
+        const float expected_edge = reconstruction == 1U || scale == 1.F ? 0.F : transfer*0.5F/128.F;
         const bool unchanged = DirectX::PackedVector::XMConvertHalfToFloat(result[0]) == expected_edge &&
             DirectX::PackedVector::XMConvertHalfToFloat(result[1]) == expected_edge &&
             DirectX::PackedVector::XMConvertHalfToFloat(result[2]) == 0.75F &&
@@ -601,8 +643,193 @@ void verify_nr_reset_isolation(void (*command)(const char*), bool lower_hook) {
         readback->Unmap(0,nullptr);
         require(unchanged, "SDR NR round trip changed paper white, alpha, or working-scale edge sampling");
     }
-    command("1\n96\nset\nNrPaperWhiteScale=1\nNrWorkingScale=1\nNrHdrTransferStrength=1"); evaluate(0);
+    f.params.Set("DLSS.Feature.Create.Flags", 2U);
+    command("1\n96\nset\nNrReconstruction=0\nNrDownsampleFilter=0\nNrUpsampleFilter=0\nNrPaperWhiteScale=1\nNrWorkingScale=1\nNrHdrTransferStrength=1"); evaluate(0);
+    for (const auto key : {"NrDownsampleFilter", "NrUpsampleFilter"}) {
+        command((std::string("1\n96\nset\n") + key + "=1").c_str()); evaluate(0);
+        require(nr_reset == 1, "Changing NR filter must reset history");
+        evaluate(0);
+        require(nr_reset == 0, "Stable NR filter must not repeatedly reset history");
+        command((std::string("1\n96\nset\n") + key + "=0").c_str()); evaluate(0);
+    }
+    // Independent CPU reference on striped input: proves the selected filters
+    // really execute (identity round trips alone could hide a disconnected knob).
+    check(color_upload->Map(0,nullptr,&mapped), "Map NR filter pattern");
+    for (unsigned y=0; y<color_desc.Height; ++y) {
+        auto* row = reinterpret_cast<DirectX::PackedVector::HALF*>(static_cast<std::byte*>(mapped) + color_fp.Offset + y*color_fp.Footprint.RowPitch);
+        for (unsigned x=0; x<color_desc.Width; ++x) {
+            row[4*x] = DirectX::PackedVector::XMConvertFloatToHalf(x%3 == 0 ? 1.F : 0.F);
+            row[4*x+1] = DirectX::PackedVector::XMConvertFloatToHalf(y%5 == 0 ? 1.F : 0.F);
+        }
+    }
+    color_upload->Unmap(0,nullptr);
+    transition_resource(color_dst.pResource,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+    f.list->CopyTextureRegion(&color_dst,0,0,0,&color_src,nullptr);
+    transition_resource(color_dst.pResource,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    f.params.Set("DLSS.Feature.Create.Flags", 2U);
+    for (float scale : {0.3F, 0.5F}) for (unsigned filters : {0U,1U,2U,3U}) {
+        command((std::string("1\n96\nset\nNrReconstruction=0\nNrHdrTransferStrength=1\nNrColorStrength=1\nNrWorkingScale=") + std::to_string(scale) +
+            "\nNrDownsampleFilter=" + std::to_string(filters&1U) + "\nNrUpsampleFilter=" + std::to_string(filters>>1U)).c_str());
+        evaluate(0);
+        const auto reference = [&](unsigned pixel, unsigned extent, unsigned period) {
+            const int working = (std::max)(32, int(float(extent)*scale + 0.5F));
+            const float ratio = float(extent)/float(working);
+            const auto signal = [&](int p) { return (std::clamp(p,0,int(extent)-1)%int(period)) == 0 ? 1.F : 0.F; };
+            const auto proxy = [&](int p) {
+                p = std::clamp(p,0,working-1);
+                float value=0.F;
+                if (filters&1U) {
+                    const float lo=float(p)*ratio, hi=float(p+1)*ratio;
+                    for(int i=int(std::floor(lo)); i<int(std::ceil(hi)); ++i)
+                        value += signal(i) * (std::max)(0.F,(std::min)(hi,float(i+1))-(std::max)(lo,float(i)))/ratio;
+                } else {
+                    const float pos=(float(p)+0.5F)*ratio-0.5F;
+                    const int i=int(std::floor(pos)); const float t=pos-float(i);
+                    value=signal(i)*(1.F-t)+signal(i+1)*t;
+                }
+                return DirectX::PackedVector::XMConvertHalfToFloat(DirectX::PackedVector::XMConvertFloatToHalf(value));
+            };
+            const float pos=(float(pixel)+0.5F)/ratio-0.5F;
+            const int i=int(std::floor(pos)); const float t=pos-float(i);
+            if (!(filters&2U)) return proxy(i)*(1.F-t)+proxy(i+1)*t;
+            const float t2=t*t,t3=t2*t;
+            const float value=proxy(i-1)*(-0.5F*t+t2-0.5F*t3)+proxy(i)*(1.F-2.5F*t2+1.5F*t3)+
+                proxy(i+1)*(0.5F*t+2.F*t2-1.5F*t3)+proxy(i+2)*(-0.5F*t2+0.5F*t3);
+            return std::clamp(value,(std::min)(proxy(i),proxy(i+1)),(std::max)(proxy(i),proxy(i+1)));
+        };
+        auto readback=make_buffer(256,D3D12_HEAP_TYPE_READBACK);
+        D3D12_TEXTURE_COPY_LOCATION from{},to{};
+        from.pResource=sr_inputs[0].color; from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        to.pResource=readback.Get(); to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,1,1,1,256};
+        const D3D12_BOX pixel{7,9,0,8,10,1};
+        transition_resource(from.pResource,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        f.list->CopyTextureRegion(&to,0,0,0,&from,&pixel);
+        transition_resource(from.pResource,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        f.finish_gpu(); check(readback->Map(0,nullptr,&mapped), "Map NR filter result");
+        const auto* result=static_cast<const DirectX::PackedVector::HALF*>(mapped);
+        const bool correct=std::abs(DirectX::PackedVector::XMConvertHalfToFloat(result[0])-reference(7,unsigned(color_desc.Width),3))<0.002F &&
+            std::abs(DirectX::PackedVector::XMConvertHalfToFloat(result[1])-reference(9,color_desc.Height,5))<0.002F &&
+            DirectX::PackedVector::XMConvertHalfToFloat(result[3])==0.25F;
+        readback->Unmap(0,nullptr);
+        require(correct,"NR filter output differs from independent CPU reference");
+    }
+    // Non-identity neural output verifies the recovered bridge and restoration
+    // ordering; identity-only tests cannot distinguish raw-vs-bridge residuals.
+    const auto override_nr = proc<void(*)(ID3D12Resource*)>(nr,"CheekyFakeNrOverrideColor");
+    const auto create_test_texture = [&](bool exposure) {
+        auto desc=color_desc;
+        if (exposure) {desc.Width=desc.Height=1;desc.Format=DXGI_FORMAT_R32_FLOAT;}
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+        ComPtr<ID3D12Resource> texture;
+        check(f.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&texture)),"Create color test texture");
+        return texture;
+    };
+    std::vector<ComPtr<ID3D12Resource>> color_test_uploads;
+    const auto upload_solid = [&](ID3D12Resource* texture,std::array<float,4> value) {
+        const auto desc=texture->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};UINT64 bytes{};
+        f.device->GetCopyableFootprints(&desc,0,1,0,&fp,nullptr,nullptr,&bytes);
+        auto upload=make_buffer(bytes,D3D12_HEAP_TYPE_UPLOAD);
+        void* data{};check(upload->Map(0,nullptr,&data),"Map color test upload");
+        for(unsigned y=0;y<desc.Height;++y) for(unsigned x=0;x<desc.Width;++x) {
+            auto* row=static_cast<std::byte*>(data)+fp.Offset+y*fp.Footprint.RowPitch;
+            if(desc.Format==DXGI_FORMAT_R32_FLOAT) reinterpret_cast<float*>(row)[x]=value[0];
+            else for(unsigned c=0;c<4;++c) reinterpret_cast<DirectX::PackedVector::HALF*>(row)[4*x+c]=DirectX::PackedVector::XMConvertFloatToHalf(value[c]);
+        }
+        upload->Unmap(0,nullptr);
+        D3D12_TEXTURE_COPY_LOCATION src{},dst{};
+        src.pResource=upload.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;src.PlacedFootprint=fp;
+        dst.pResource=texture;dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        transition_resource(texture,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        f.list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        transition_resource(texture,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        color_test_uploads.push_back(upload);
+    };
+    auto model_color=create_test_texture(false), exposure_texture=create_test_texture(true);
+    upload_solid(model_color.Get(),{0.5F,0.25F,0.125F,0.F});
+    upload_solid(exposure_texture.Get(),{2.F,0.F,0.F,0.F});
+    upload_solid(f.textures12[0].Get(),{4.F,1.F,0.125F,0.25F});
+    override_nr(model_color.Get());
+    const auto convert = [](float x,unsigned encoding,bool encode) {
+        const float a=std::abs(x);float v=a;
+        if(encoding==0) v=encode ? (a<=0.0031308F?12.92F*a:1.055F*std::pow(a,1.F/2.4F)-0.055F)
+            : (a<=0.04045F?a/12.92F:std::pow((a+0.055F)/1.055F,2.4F));
+        if(encoding==1) {
+            const float p=std::pow(a,encode?2610.F/16384.F:32.F/2523.F);
+            v=encode?std::pow((3424.F/4096.F+2413.F/128.F*p)/(1.F+2392.F/128.F*p),2523.F/32.F)
+                :std::pow((std::max)(p-3424.F/4096.F,0.F)/(std::max)(2413.F/128.F-2392.F/128.F*p,0.000001F),16384.F/2610.F);
+        }
+        return x<0?-v:v;
+    };
+    for(float source_level:{1.F,0.0009765625F,0.F}) {
+    upload_solid(f.textures12[0].Get(),{4.F*source_level,source_level,0.125F*source_level,0.25F});
+    for(unsigned exposure_case:{0U,1U,2U,3U,4U})
+    for(unsigned pipeline:{1U,2U}) for(unsigned signal:{0U,1U,2U})
+    for(unsigned domain:{0U,1U,2U}) for(unsigned residual:{0U,1U})
+    for(unsigned mode:{0U,1U,2U}) {
+        upload_solid(exposure_texture.Get(),{exposure_case==3?0.F:exposure_case==4?std::numeric_limits<float>::quiet_NaN():2.F,0.F,0.F,0.F});
+        auto* supplied_exposure=exposure_case==1?nullptr:exposure_case==2?f.textures12[0].Get():exposure_texture.Get();
+        f.params.Set("ExposureTexture",supplied_exposure);f.nr_test_exposure=supplied_exposure;f.nr_test_exposure_override=true;
+        command((std::string("1\n96\nset\nNrColorPipeline=")+std::to_string(pipeline)+
+            "\nNrSignalEncoding="+std::to_string(signal)+"\nNrScalingDomain="+std::to_string(domain)+
+            "\nNrReconstruction="+std::to_string(residual)+"\nNrExposureMode="+std::to_string(mode)+
+            "\nNrExposureMultiplier=1.5\nNrPaperWhiteScale=2\nNrWorkingScale=0.5\nNrHdrTransferStrength=1\nNrColorStrength=1").c_str());
+        evaluate(0);
+        auto readback=make_buffer(1024,D3D12_HEAP_TYPE_READBACK);
+        D3D12_TEXTURE_COPY_LOCATION from{},to{};
+        from.pResource=sr_inputs[0].color;from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        to.pResource=readback.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,1,1,1,256};
+        const D3D12_BOX pixel{0,0,0,1,1,1};
+        transition_resource(from.pResource,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        f.list->CopyTextureRegion(&to,0,0,0,&from,&pixel);
+        transition_resource(from.pResource,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        from.pResource=nr_color_resource;to.PlacedFootprint.Offset=512;
+        transition_resource(from.pResource,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        f.list->CopyTextureRegion(&to,0,0,0,&from,&pixel);
+        transition_resource(from.pResource,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        f.finish_gpu();void* data{};check(readback->Map(0,nullptr,&data),"Map bridge result");
+        const auto* result=static_cast<DirectX::PackedVector::HALF*>(data);
+        const auto* proxy_result=reinterpret_cast<DirectX::PackedVector::HALF*>(static_cast<std::byte*>(data)+512);
+        const float texture_exposure=exposure_case==0?2.F:1.F;
+        const float E=1.5F*(mode==1?texture_exposure:mode==2?1.F/texture_exposure:1.F);
+        const std::array<float,3> original{4.F*source_level,source_level,0.125F*source_level},neural{0.5F,0.25F,0.125F};
+        const float k=pipeline==1 ? 1.F/std::sqrt(1.F+(4.F*source_level*E/2.F)*(4.F*source_level*E/2.F)) : 1.F;
+        for(unsigned c=0;c<3;++c) {
+            const float normalized=(pipeline==2?convert(original[c],0,false):original[c])*E/2.F;
+            const float basis=pipeline==1?std::clamp(normalized*k,0.F,1.F):normalized;
+            const auto scale_encode=[&](float v){return convert(v*(domain==1?0.02F:1.F),domain,true);};
+            const auto scale_decode=[&](float v){return convert(v,domain,false)/(domain==1?0.02F:1.F);};
+            // Verify encoding independently, then use the actual quantized proxy
+            // for restoration. PQ half-float rounding can cross a half-ULP tie
+            // between CPU/GPU pow implementations and amplify near-black edits.
+            const float proxy=DirectX::PackedVector::XMConvertHalfToFloat(proxy_result[c]);
+            require(std::abs(proxy-convert(basis,signal,true))<0.001F*(1.F+std::abs(proxy)),"NR bridge input differs from CPU reference");
+            float edited=scale_encode(convert(neural[c],signal,false));
+            if(residual) edited+=scale_encode(basis)-scale_encode(convert(proxy,signal,false));
+            float expected=scale_decode(edited)/k/E*2.F;
+            if(pipeline==2) expected=convert(expected,0,true);
+            const float actual=DirectX::PackedVector::XMConvertHalfToFloat(result[c]);
+            if (!(std::isfinite(actual) && std::abs(actual-expected)<0.02F*(1.F+std::abs(expected))))
+                printf("Bridge mismatch case=%u pipeline=%u signal=%u domain=%u residual=%u mode=%u c=%u actual=%.9g expected=%.9g E=%.9g\n",
+                    exposure_case,pipeline,signal,domain,residual,mode,c,actual,expected,E);
+            require(std::isfinite(actual) && std::abs(actual-expected)<0.02F*(1.F+std::abs(expected)),
+                "NR reference color/exposure/residual differs from CPU oracle");
+        }
+        require(DirectX::PackedVector::XMConvertHalfToFloat(result[3])==0.25F,"Bridge replaced original alpha");
+        readback->Unmap(0,nullptr);
+    }
+    }
+    override_nr(nullptr);f.nr_test_exposure=nullptr;f.nr_test_exposure_override=false;f.params.Set("ExposureTexture",static_cast<ID3D12Resource*>(nullptr));
+    command("1\n96\nset\nNrColorPipeline=0\nNrSignalEncoding=0\nNrScalingDomain=2\nNrExposureMode=0\nNrExposureMultiplier=1\nNrPaperWhiteScale=1\nNrReconstruction=0");
     copy_nr_color(false);
+    command("1\n96\nset\nNrReconstruction=1"); evaluate(0);
+    require(nr_reset == 1, "Changing NR reconstruction must reset NR history");
+    evaluate(0);
+    require(nr_reset == 0, "Stable NR reconstruction must not repeatedly reset history");
+    command("1\n96\nset\nNrReconstruction=0"); evaluate(0);
     // Exercise the production feature cache through the fake NVIDIA runtime:
     // warm two toggle states, then churn dimensions without growing live features.
     const auto nr_creates = proc<Counter>(nr, "CheekyFakeCreates");
@@ -630,7 +857,7 @@ void verify_nr_reset_isolation(void (*command)(const char*), bool lower_hook) {
         ModelSetting{"NrSkinStructureStrength", "DLSSNR.SkinStructureStrength", 1.F, 0.75F},
         ModelSetting{"NrAutomaticMask", "DLSSNR.UseAutoMask", 0.F, 1.F},
         ModelSetting{"NrUiCorrection", "DLSSNR.UICorrection", 0.F, 1.F},
-        ModelSetting{"NrPreset", "DLSSNR.Hint.Render.Preset", 0.F, 3.F},
+        ModelSetting{"NrPreset", "DLSSNR.Hint.Render.Preset", 0.F, 2.F},
         ModelSetting{"NrStyle", "DLSSNR.Style", 0.F, 2.F}}) {
         const auto set_value = [&](float value) {
             const bool boolean = std::string(item.setting) == "NrAutomaticMask" || std::string(item.setting) == "NrUiCorrection";
@@ -1455,6 +1682,7 @@ void verify_late_attach_test(CheekyUEVRSnapshotFn get, void (*command)(const cha
     verify_d3d11_reused_output_extent(command);
     verify_d3d11_native_extent(command, true);
     verify_nr_reset_isolation(command, snapshot(get).find("\"d3d12_lower_hook_active\":true") != std::string::npos);
+    if(GetEnvironmentVariableW(L"CHEEKY_TEST_CACHE_ONLY",nullptr,0))return;
     if (!f.context && !f.use_sl) {
         command("1\n70\nset\nEnabled=false");
         // UE can discard a recording after evaluation. Exhaust more than the

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
+#include <limits>
 
 namespace cheeky::foveated_dlss {
 // Test executable substitutes the NVIDIA evaluator; production copy/orchestration
@@ -63,6 +64,75 @@ int run_nr_processing_tests() {
         };
         // Old INIs exposed intensity up to 2, although the model saturates at 1.
         const auto saved_settings = current_settings();
+        const Settings defaults{};
+        require(defaults.nr_color_pipeline == 0U && defaults.nr_pass2_color_pipeline == 0U &&
+            defaults.nr_pass3_color_pipeline == 0U && defaults.nr_exposure_multiplier == 1.0F &&
+            defaults.nr_pass2_exposure_multiplier == 1.0F && defaults.nr_pass3_exposure_multiplier == 1.0F,
+            "NR reference color processing must remain opt-in with neutral exposure");
+        require(defaults.nr_signal_encoding == 0U && defaults.nr_pass2_signal_encoding == 0U &&
+            defaults.nr_pass3_signal_encoding == 0U && defaults.nr_scaling_domain == 2U &&
+            defaults.nr_pass2_scaling_domain == 2U && defaults.nr_pass3_scaling_domain == 2U &&
+            defaults.nr_exposure_mode == 0U && defaults.nr_pass2_exposure_mode == 0U &&
+            defaults.nr_pass3_exposure_mode == 0U, "Default signal is sRGB, resampling linear, texture exposure off");
+        for (const auto requested : {0U, 1U, 2U, 3U, 0xffffffffU}) {
+            auto settings = saved_settings;
+            settings.nr_color_pipeline = settings.nr_pass2_color_pipeline = settings.nr_pass3_color_pipeline = requested;
+            settings.nr_signal_encoding = settings.nr_pass2_signal_encoding = settings.nr_pass3_signal_encoding = requested;
+            settings.nr_scaling_domain = settings.nr_pass2_scaling_domain = settings.nr_pass3_scaling_domain = requested;
+            settings.nr_exposure_mode = settings.nr_pass2_exposure_mode = settings.nr_pass3_exposure_mode = requested;
+            update_settings(settings);
+            const auto actual = current_settings();
+            update_settings(saved_settings);
+            const auto expected = requested <= 2U ? requested : 0U;
+            const auto domain = requested <= 2U ? requested : 2U;
+            require(actual.nr_color_pipeline == expected && actual.nr_pass2_color_pipeline == expected &&
+                actual.nr_pass3_color_pipeline == expected, "Normalize NR color pipeline for all passes");
+            require(actual.nr_signal_encoding == expected && actual.nr_pass2_signal_encoding == expected &&
+                actual.nr_pass3_signal_encoding == expected, "Normalize NR signal encoding for all passes");
+            require(actual.nr_scaling_domain == domain && actual.nr_pass2_scaling_domain == domain &&
+                actual.nr_pass3_scaling_domain == domain, "Invalid NR scaling domain falls back to linear");
+            require(actual.nr_exposure_mode == expected && actual.nr_pass2_exposure_mode == expected &&
+                actual.nr_pass3_exposure_mode == expected, "Invalid NR texture exposure must be disabled");
+        }
+        for (const auto [requested, expected] : {std::pair{-1.0F, 0.01F}, std::pair{0.0F, 0.01F},
+            std::pair{0.5F, 0.5F}, std::pair{10.0F, 10.0F}, std::pair{20.0F, 10.0F},
+            std::pair{std::numeric_limits<float>::quiet_NaN(), 1.0F},
+            std::pair{std::numeric_limits<float>::infinity(), 1.0F},
+            std::pair{-std::numeric_limits<float>::infinity(), 1.0F}}) {
+            auto settings = saved_settings;
+            settings.nr_exposure_multiplier = settings.nr_pass2_exposure_multiplier = settings.nr_pass3_exposure_multiplier = requested;
+            update_settings(settings);
+            const auto actual = current_settings();
+            update_settings(saved_settings);
+            require(actual.nr_exposure_multiplier == expected && actual.nr_pass2_exposure_multiplier == expected &&
+                actual.nr_pass3_exposure_multiplier == expected, "Exposure must clamp finite values and replace nonfinite with identity");
+        }
+        for (const auto requested : {0U, 1U, 2U, 0xffffffffU}) {
+            auto settings = saved_settings;
+            settings.nr_reconstruction = settings.nr_pass2_reconstruction = settings.nr_pass3_reconstruction = requested;
+            settings.nr_downsample_filter = settings.nr_pass2_downsample_filter = settings.nr_pass3_downsample_filter = requested;
+            settings.nr_upsample_filter = settings.nr_pass2_upsample_filter = settings.nr_pass3_upsample_filter = requested;
+            update_settings(settings);
+            const auto actual = current_settings();
+            update_settings(saved_settings);
+            const auto expected = requested == 1U ? 1U : 0U;
+            require(actual.nr_reconstruction == expected && actual.nr_pass2_reconstruction == expected &&
+                actual.nr_pass3_reconstruction == expected, "Invalid NR reconstruction must use legacy mode");
+            require(actual.nr_downsample_filter == expected && actual.nr_pass2_downsample_filter == expected &&
+                actual.nr_pass3_downsample_filter == expected && actual.nr_upsample_filter == expected &&
+                actual.nr_pass2_upsample_filter == expected && actual.nr_pass3_upsample_filter == expected,
+                "Invalid NR filters must default to bilinear in all passes");
+        }
+        for (const auto requested : {0U, 1U, 2U, 3U, 5U, 7U, 10U, 11U, 12U, 13U, 0xffffffffU}) {
+            auto settings = saved_settings;
+            settings.nr_preset = settings.nr_pass2_preset = settings.nr_pass3_preset = requested;
+            update_settings(settings);
+            const auto actual = current_settings();
+            update_settings(saved_settings);
+            const auto expected = requested <= 2U ? requested : 0U;
+            require(actual.nr_preset == expected && actual.nr_pass2_preset == expected &&
+                actual.nr_pass3_preset == expected, "NR preset normalization must preserve A/B and default unknown values");
+        }
         for (const auto [requested, expected] : {std::pair{2.0F, 1.0F},
                  std::pair{-1.0F, 0.0F}, std::pair{0.375F, 0.375F}}) {
             auto settings = saved_settings;

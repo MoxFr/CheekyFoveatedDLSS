@@ -96,7 +96,10 @@ bool vulkan_nr(const VulkanDeviceApi& a,VkCommandBuffer cmd,const DlssFrameContr
     CodecConstants codec{{region.width,region.height},{region.width,region.height},{color_x+region.base_x,color_y+region.base_y},{w,h},
         settings.nr_paper_white_scale,settings.nr_hdr_transfer_strength,settings.nr_color_strength,(c.create_flags&1U)?1U:0U,
         {0,0},{region.width,region.height},region.shape_width,region.shape_height,region.roundness,region.transition,
-        settings.nr_alignment_border_enabled?1U:0U,region.mask.count,{},{}};
+        settings.nr_alignment_border_enabled?1U:0U,region.mask.count,settings.nr_reconstruction,
+        settings.nr_downsample_filter | (settings.nr_upsample_filter << 1U),{},
+        settings.nr_color_pipeline,settings.nr_signal_encoding,settings.nr_exposure_mode,0U,
+        settings.nr_exposure_multiplier,settings.nr_scaling_domain,{}};
     std::memcpy(codec.mask_bounds,region.mask.bounds,sizeof(codec.mask_bounds));
     // All descriptor bindings remain valid even when an entry point doesn't use
     // them; this also keeps the shared codec layout identical on both APIs.

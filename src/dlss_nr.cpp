@@ -6,6 +6,9 @@
 #include "d3d_shaders.hpp"
 #include "nr_parameters.hpp"
 #include "nr_runtime_module.hpp"
+#include "nr_edit_cache.hpp"
+#include "nr_gpu_budget.hpp"
+#include "nr_f5.hpp"
 
 #include "d3d12_output_contract.hpp"
 #include "dlss_nr_contract.hpp"
@@ -129,6 +132,7 @@ struct GpuResources {
     NrLifetime uses;
     std::uint64_t last_use{};
     ID3D12Resource* game_output{};
+    ID3D12Resource* exposure_texture{};
     ID3D12Resource* original_output{};
     ID3D12Resource* color_proxy{};
     ID3D12Resource* neural_output{};
@@ -153,6 +157,9 @@ struct CachedFeature {
 };
 
 struct ViewState {
+    NrEditCache edit_cache;
+    NrGpuBudget budget;
+    bool model_history_gap{};
     NrLifetime uses;
     bool retired{};
     DlssViewId view_id{};
@@ -197,11 +204,13 @@ void release_gpu(GpuResources& gpu) noexcept {
     release(gpu.color_proxy);
     release(gpu.original_output);
     release(gpu.game_output);
+    release(gpu.exposure_texture);
     gpu = {};
 }
 
 void release_feature(ViewState& view) noexcept {
     if (view.handle != nullptr && runtime.release_feature != nullptr) {
+        nr_f5::retire(view.handle);
         static_cast<void>(runtime.release_feature(view.handle));
     }
     if (view.parameters != nullptr && runtime.destroy_parameters != nullptr) {
@@ -213,6 +222,7 @@ void release_feature(ViewState& view) noexcept {
     view.feature_failed = false;
     for (const auto& retired : view.retired_features) {
         if (retired.handle != nullptr && runtime.release_feature != nullptr) {
+            nr_f5::retire(retired.handle);
             static_cast<void>(runtime.release_feature(retired.handle));
         }
         if (retired.parameters != nullptr && runtime.destroy_parameters != nullptr) {
@@ -256,6 +266,7 @@ void evict_retired_features(ViewState& view) noexcept {
         const auto retired = std::move(*it);
         it = view.retired_features.erase(it);
         if (retired.handle != nullptr && runtime.release_feature != nullptr) {
+            nr_f5::retire(retired.handle);
             static_cast<void>(runtime.release_feature(retired.handle));
         }
         if (retired.parameters != nullptr && runtime.destroy_parameters != nullptr) {
@@ -277,6 +288,8 @@ void evict_retired_features(ViewState& view) noexcept {
     }
 
     const auto module=load_nr_runtime_module();
+    diagnostics.runtime_path = module.path;
+    diagnostics.runtime_version = module.version;
     runtime.module=module.module;
     const auto& directory=module.directory;
     if(!runtime.module) {
@@ -352,7 +365,8 @@ void evict_retired_features(ViewState& view) noexcept {
     runtime.device = device;
     runtime.device->AddRef();
     runtime.state = 1U;
-    trace_event("DLSS-NR 310.8 feature-18 runtime initialized");
+    trace_event("DLSS-NR feature-18 runtime initialized file_version=%s path=%s",
+        diagnostics.runtime_version.data(), diagnostics.runtime_path.data());
     return true;
 }
 
@@ -614,7 +628,7 @@ void evict_retired_features(ViewState& view) noexcept {
 
     D3D12_DESCRIPTOR_HEAP_DESC descriptor_heap{};
     descriptor_heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    descriptor_heap.NumDescriptors = 8U;
+    descriptor_heap.NumDescriptors = 9U;
     descriptor_heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     result = device->CreateDescriptorHeap(
         &descriptor_heap,
@@ -674,14 +688,17 @@ void evict_retired_features(ViewState& view) noexcept {
         }
         cleanup(); return true;
     }
-    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    D3D12_DESCRIPTOR_RANGE ranges[3]{};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[0].NumDescriptors = 3U;
     ranges[0].BaseShaderRegister = 0U;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     ranges[1].NumDescriptors = 2U;
     ranges[1].BaseShaderRegister = 0U;
-    D3D12_ROOT_PARAMETER root_parameters[3]{};
+    ranges[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[2].NumDescriptors = 1U;
+    ranges[2].BaseShaderRegister = 3U;
+    D3D12_ROOT_PARAMETER root_parameters[4]{};
     root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     root_parameters[0].DescriptorTable.NumDescriptorRanges = 1U;
     root_parameters[0].DescriptorTable.pDescriptorRanges = &ranges[0];
@@ -690,9 +707,12 @@ void evict_retired_features(ViewState& view) noexcept {
     root_parameters[1].DescriptorTable.pDescriptorRanges = &ranges[1];
     root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     root_parameters[2].Constants.ShaderRegister = 0U;
-    root_parameters[2].Constants.Num32BitValues = 40U;
+    root_parameters[2].Constants.Num32BitValues = sizeof(CodecConstants) / sizeof(std::uint32_t);
+    root_parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    root_parameters[3].DescriptorTable.NumDescriptorRanges = 1U;
+    root_parameters[3].DescriptorTable.pDescriptorRanges = &ranges[2];
     D3D12_ROOT_SIGNATURE_DESC root_desc{};
-    root_desc.NumParameters = 3U;
+    root_desc.NumParameters = 4U;
     root_desc.pParameters = root_parameters;
     result = D3D12SerializeRootSignature(
         &root_desc,
@@ -743,16 +763,58 @@ void evict_retired_features(ViewState& view) noexcept {
     return true;
 }
 
+// Only sample an unambiguous floating-point scalar from this device. Unknown
+// tags and unsupported resources are an identity exposure, never a guessed SRV.
+ID3D12Resource* supported_exposure(const DlssNrFrame& frame) noexcept {
+    auto* resource = frame.exposure_texture;
+    if (!resource || !frame.color || static_cast<unsigned>(frame.exposure_state) == 0xFFFFFFFFU) return nullptr;
+    const auto d = resource->GetDesc();
+    if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d.Width != 1U || d.Height != 1U ||
+        d.DepthOrArraySize != 1U || d.SampleDesc.Count != 1U ||
+        (d.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) return nullptr;
+    switch (d.Format) {
+    case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_R32G32_FLOAT:
+    case DXGI_FORMAT_R16_FLOAT: case DXGI_FORMAT_R16G16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R32G32B32A32_FLOAT: break;
+    default: return nullptr;
+    }
+    Microsoft::WRL::ComPtr<ID3D12Device> device, color_device;
+    if (FAILED(resource->GetDevice(IID_PPV_ARGS(&device))) ||
+        FAILED(frame.color->GetDevice(IID_PPV_ARGS(&color_device))) || device != color_device) return nullptr;
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support{d.Format};
+    if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) ||
+        !(support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_LOAD)) return nullptr;
+    return resource;
+}
+
+// Called only at creation or after all prior descriptor users have completed.
+void bind_exposure(ID3D12Device* device, GpuResources& gpu, ID3D12Resource* exposure) noexcept {
+    auto cpu = gpu.descriptors->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += 8U * gpu.descriptor_size;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = exposure ? exposure->GetDesc().Format : DXGI_FORMAT_R32_FLOAT;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1U;
+    device->CreateShaderResourceView(exposure, &srv, cpu);
+    if (exposure) exposure->AddRef();
+    release(gpu.exposure_texture);
+    gpu.exposure_texture = exposure;
+}
+
 [[nodiscard]] GpuResources* find_or_create_gpu(
     ViewState& view,
     const DlssNrFrame& frame,
     const NrRegion& region,
     const std::uint32_t working_width,
     const std::uint32_t working_height,
-    const bool border_only = false
+    const bool border_only = false,
+    const bool use_exposure = false
 ) noexcept {
+    auto* exposure = !border_only && use_exposure ? supported_exposure(frame) : nullptr;
     for (auto& gpu : view.gpu_resources) {
         if (gpu.border_only == border_only && gpu.game_output == frame.color &&
+            gpu.exposure_texture == exposure &&
             (border_only || (gpu.width == region.width && gpu.height == region.height &&
             gpu.working_width == working_width && gpu.working_height == working_height &&
             gpu.guides.source_motion.Get() == frame.motion_vectors &&
@@ -786,6 +848,7 @@ void evict_retired_features(ViewState& view) noexcept {
         cpu.ptr += gpu.descriptor_size;
         device->CreateUnorderedAccessView(frame.color, nullptr, &uav, cpu);
         frame.color->AddRef(); release(gpu.game_output); gpu.game_output = frame.color;
+        bind_exposure(device.Get(), gpu, exposure);
         if (!border_only) gpu.guides.rebind(device.Get(), frame.motion_vectors, frame.depth);
         ++diagnostics.resource_rebinds;
         if (!gpu.uses.record(frame.command_list)) return nullptr;
@@ -835,6 +898,7 @@ void evict_retired_features(ViewState& view) noexcept {
         return nullptr;
     }
     gpu.last_use = ++view.gpu_use_sequence;
+    bind_exposure(incoming.Get(), gpu, exposure);
     if (border_only) ++diagnostics.border_creations; else ++diagnostics.codec_creations;
     return &gpu;
 }
@@ -887,6 +951,9 @@ void dispatch_codec(
     handle.ptr += static_cast<std::uint64_t>(destination_descriptor) *
         gpu.descriptor_size;
     frame.command_list->SetComputeRootDescriptorTable(1U, handle);
+    handle = gpu.descriptors->GetGPUDescriptorHandleForHeapStart();
+    handle.ptr += 8ULL * gpu.descriptor_size;
+    frame.command_list->SetComputeRootDescriptorTable(3U, handle);
     const auto width = gpu.border_only ? region.width : gpu.width;
     const auto height = gpu.border_only ? region.height : gpu.height;
     CodecConstants constants{
@@ -905,17 +972,38 @@ void dispatch_codec(
         region.roundness,
         region.transition,
         settings.nr_alignment_border_enabled ? 1U : 0U,
-        region.mask.count, {}, {},
+        region.mask.count, settings.nr_reconstruction,
+        settings.nr_downsample_filter | (settings.nr_upsample_filter << 1U), {},
+        settings.nr_color_pipeline, settings.nr_signal_encoding, settings.nr_exposure_mode,
+        gpu.exposure_texture != nullptr ? 1U : 0U, settings.nr_exposure_multiplier, settings.nr_scaling_domain, {},
     };
     std::memcpy(constants.mask_bounds, region.mask.bounds, sizeof(constants.mask_bounds));
-    frame.command_list->SetComputeRoot32BitConstants(2U, 40U, &constants, 0U);
+    frame.command_list->SetComputeRoot32BitConstants(2U, sizeof(CodecConstants) / sizeof(std::uint32_t), &constants, 0U);
     const auto dispatch_width = (std::max)(width, gpu.working_width);
     const auto dispatch_height = (std::max)(height, gpu.working_height);
+    // Restore the exact supplied state after each codec pass, including decode.
+    // Never modify descriptors here: earlier command lists may still reference them.
+    if (gpu.exposure_texture) transition(frame.command_list, gpu.exposure_texture,
+        frame.exposure_state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     frame.command_list->Dispatch(
         (dispatch_width + 15U) / 16U,
         (dispatch_height + 15U) / 16U,
         1U
     );
+    if (gpu.exposure_texture) transition(frame.command_list, gpu.exposure_texture,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, frame.exposure_state);
+}
+
+// Extra DLSS-NR passes use private view IDs for temporal history only.
+// Never feed those private bits into AFW/gaze coordination: bit 62 is already
+// AFW's own coordinator namespace. Keeping coverage on the original view ID
+// prevents pass 3 from accidentally selecting/toggling the wrong eye/gaze view.
+constexpr DlssViewId kNrPass2ViewBit = (DlssViewId{1} << 63U);
+constexpr DlssViewId kNrPass3ViewBit = (DlssViewId{1} << 61U);
+constexpr DlssViewId kNrExtraPassViewMask = kNrPass2ViewBit | kNrPass3ViewBit;
+
+static DlssViewId nr_base_view_id(const DlssViewId view_id) noexcept {
+    return view_id & ~kNrExtraPassViewMask;
 }
 
 // Resolve NR independently of SR: changing NR dimensions must not resize the
@@ -936,11 +1024,11 @@ bool resolve_afw_nr_coverage(DlssNrFrame& frame, Settings& settings) noexcept {
         if (!frame.input_width || !frame.input_height) return false;
         frame.center = foveation_center_from_geometry(crop, frame.input_width, frame.input_height);
         coverage.afw_mask = settings.afw_mask;
-        apply_next_jump_preview(coverage, frame.view_id);
-    } else if (!calculate_coordinated_crop(coverage, afw_nr_gaze_view(frame.view_id), frame.color,
+        apply_next_jump_preview(coverage, nr_base_view_id(frame.view_id));
+    } else if (!calculate_coordinated_crop(coverage, afw_nr_gaze_view(nr_base_view_id(frame.view_id)), frame.color,
             frame.input_width, frame.input_height, frame.output_width, frame.output_height,
             frame.view_output_base_x, frame.view_output_base_y, crop, reset, nullptr, &frame.center)) return false;
-    else apply_next_jump_preview(coverage, afw_nr_gaze_view(frame.view_id));
+    else apply_next_jump_preview(coverage, afw_nr_gaze_view(nr_base_view_id(frame.view_id)));
     frame.has_center = true; frame.reset |= reset;
     settings.nr_width = static_cast<float>(crop.input_width) / frame.input_width;
     settings.nr_height = static_cast<float>(crop.input_height) / frame.input_height;
@@ -952,14 +1040,45 @@ bool resolve_afw_nr_coverage(DlssNrFrame& frame, Settings& settings) noexcept {
 }
 }  // namespace
 
-bool evaluate_dlss_nr(
+
+static Settings nr_settings_for_extra_pass(const Settings& base, const unsigned pass) {
+    auto out = base;
+#define COPY_PASS_FIELD(field) out.nr_##field = base.nr_pass##pass##_##field
+    if (pass == 2U) {
+#define COPY2(field) out.nr_##field = base.nr_pass2_##field
+        COPY2(working_scale); COPY2(preset); COPY2(style); COPY2(intensity); COPY2(local_tone_strength);
+        COPY2(local_structure_strength); COPY2(skin_structure_strength); COPY2(automatic_mask);
+        COPY2(ui_correction); COPY2(paper_white_scale); COPY2(hdr_transfer_strength);
+        COPY2(color_strength); COPY2(reconstruction); COPY2(downsample_filter); COPY2(upsample_filter);
+        COPY2(color_pipeline); COPY2(signal_encoding); COPY2(scaling_domain); COPY2(exposure_mode); COPY2(exposure_multiplier);
+        COPY2(depth_convention); COPY2(motion_scale_x_multiplier);
+        COPY2(motion_scale_y_multiplier);
+#undef COPY2
+    } else {
+#define COPY3(field) out.nr_##field = base.nr_pass3_##field
+        COPY3(working_scale); COPY3(preset); COPY3(style); COPY3(intensity); COPY3(local_tone_strength);
+        COPY3(local_structure_strength); COPY3(skin_structure_strength); COPY3(automatic_mask);
+        COPY3(ui_correction); COPY3(paper_white_scale); COPY3(hdr_transfer_strength);
+        COPY3(color_strength); COPY3(reconstruction); COPY3(downsample_filter); COPY3(upsample_filter);
+        COPY3(color_pipeline); COPY3(signal_encoding); COPY3(scaling_domain); COPY3(exposure_mode); COPY3(exposure_multiplier);
+        COPY3(depth_convention); COPY3(motion_scale_x_multiplier);
+        COPY3(motion_scale_y_multiplier);
+#undef COPY3
+    }
+#undef COPY_PASS_FIELD
+    return out;
+}
+
+bool evaluate_dlss_nr_internal(
     const DlssNrFrame& input_frame,
-    const Settings& input_settings
+    const Settings& input_settings,
+    const bool allow_second_pass
 ) noexcept {
     auto frame = input_frame;
     auto settings = input_settings;
     if (!resolve_afw_nr_coverage(frame, settings)) { skip_dlss_nr_history(frame.view_id); return false; }
     AfwPrivateWorkScope private_work;
+    {
     std::lock_guard execution_lock(calibration12_execution_mutex());
     std::lock_guard lock(nr_mutex);
     collect_retired_views();
@@ -988,6 +1107,8 @@ bool evaluate_dlss_nr(
         bool succeeded{};
         ~HistoryGuard() {
             if (succeeded) return;
+            view.edit_cache.invalidate();
+            view.model_history_gap = true;
             view.was_enabled = false;
             const auto count = diagnostics.failed_calls;
             if (count <= 8U || (count & (count - 1U)) == 0U)
@@ -1040,6 +1161,7 @@ bool evaluate_dlss_nr(
         ++diagnostics.failed_calls;
         return false;
     }
+    if (settings.nr_f5) static_cast<void>(nr_f5::install());
     const bool runtime_ready = initialize_runtime(device);
     device->Release();
     if (!runtime_ready) return false;
@@ -1083,7 +1205,9 @@ bool evaluate_dlss_nr(
         frame,
         codec_region,
         working_width,
-        working_height
+        working_height,
+        false,
+        settings.nr_color_pipeline != 0U && settings.nr_exposure_mode != 0U
     );
     if (gpu == nullptr) return false;
     const auto depth_x = frame.color_is_region
@@ -1124,7 +1248,8 @@ bool evaluate_dlss_nr(
         );
 
     auto* const parameters = view.parameters;
-    const auto signature = dlss_nr_history_signature(nr_settings_signature(settings, region), {
+    const auto signature = dlss_nr_history_signature(nr_settings_signature(settings, region) ^
+        (settings.nr_edit_cache ? 0x95b741d3a86c2f09ULL : 0ULL) ^ (settings.nr_f5 ? 0x4655000000000001ULL : 0ULL), {
         frame.input_width, frame.input_height, frame.output_width, frame.output_height,
         processing_width, processing_height,
         frame.depth_width, frame.depth_height, frame.motion_width, frame.motion_height,
@@ -1233,6 +1358,12 @@ bool evaluate_dlss_nr(
             frame.has_center ? "yes" : "no", frame.center.u, frame.center.v);
     }
 
+    struct BudgetScope {
+        NrGpuBudget& budget; ID3D12GraphicsCommandList* list; NrGpuBudget::Sample* sample;
+        bool model{true},valid{};
+        ~BudgetScope(){budget.end(list,sample,model,valid);}
+    } budget_scope{view.budget,frame.command_list,
+        settings.nr_edit_cache&&settings.nr_adaptive_cache?view.budget.begin(frame.command_list):nullptr};
     uav_barrier(frame.command_list, frame.color);
     transition(
         frame.command_list,
@@ -1303,12 +1434,40 @@ bool evaluate_dlss_nr(
     parameters->Set("DLSSNR.Upscaling", 0U);
     set_model_tuning(parameters, settings);
 
-    const auto result = runtime.evaluate_feature(
+    // Only reuse a keyframe from the immediately preceding eye/pass evaluation.
+    // Guide motion already includes current-to-previous crop translation and
+    // jitter compensation. Keep overlapping history when the gaze crop moves;
+    // the shader rejects newly exposed pixels outside the previous crop.
+    if (reset || !settings.nr_edit_cache) view.edit_cache.invalidate();
+    view.budget.collect();
+    const unsigned passes=1U+unsigned(settings.nr_second_pass&&settings.nr_foveated)+unsigned(settings.nr_third_pass&&settings.nr_second_pass&&settings.nr_foveated);
+    const float gaze_motion=(std::max)(std::abs(float(region.base_x)-view.history.x)/region.width,std::abs(float(region.base_y)-view.history.y)/region.height);
+    const unsigned interval=nr_budget_interval(settings.nr_adaptive_cache,settings.nr_gpu_budget_ms,passes,
+        view.budget.model_cost(),view.budget.reuse_cost(),settings.nr_cache_max_interval,gaze_motion);
+    bool reused = false;
+    if (settings.nr_edit_cache && !settings.nr_f5 && !reset && interval>1 && view.edit_cache.ready(interval-1)) {
+        reused = view.edit_cache.apply(frame.command_list, gpu->color_proxy,
+            gpu->guides.depth.Get(), gpu->guides.motion.Get(), gpu->neural_output);
+    }
+    // The model has not seen the skipped frame: do not feed stale temporal history.
+    if (!reused && view.model_history_gap) parameters->Set("DLSSNR.Reset", 1U);
+    nr_f5::Scope f5_scope(view.handle,frame.command_list,settings.nr_f5 && std::strcmp(diagnostics.runtime_version.data(),"310.9.16.0")==0,reset || view.history.x != region.base_x || view.history.y != region.base_y);
+    const auto result = reused ? static_cast<NgxResult>(1U) : runtime.evaluate_feature(
         frame.command_list,
         view.handle,
         parameters,
         nullptr
     );
+    diagnostics.f5_hooked=nr_f5::state().installed;
+    diagnostics.f5_computed=nr_f5::state().computed.load();
+    diagnostics.f5_reused=nr_f5::state().reused.load();
+    diagnostics.f5_unsupported=nr_f5::state().unsupported.load();
+    budget_scope.model=!reused;
+    budget_scope.valid=ngx_succeeded(result);
+    diagnostics.model_gpu_ms=view.budget.model_cost();
+    diagnostics.cache_gpu_ms=view.budget.reuse_cost();
+    diagnostics.gpu_timing_samples=view.budget.valid_samples();
+    diagnostics.cache_interval=settings.nr_edit_cache?interval:1U;
     diagnostics.last_result = result;
     diagnostics.output_width = frame.output_width;
     diagnostics.output_height = frame.output_height;
@@ -1350,6 +1509,12 @@ bool evaluate_dlss_nr(
         );
         return false;
     }
+
+    if (settings.nr_edit_cache && !settings.nr_f5) {
+        static_cast<void>(view.edit_cache.capture(frame.command_list, gpu->color_proxy,
+            gpu->neural_output, gpu->guides.depth.Get(),reused));
+    }
+    view.model_history_gap = reused;
 
     transition(
         frame.command_list,
@@ -1397,7 +1562,8 @@ bool evaluate_dlss_nr(
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS
     );
-    ++diagnostics.evaluation_calls;
+    if (!reused) ++diagnostics.evaluation_calls;
+    else ++diagnostics.cache_reuses;
     view.history = history;
     view.last_region = region; view.last_order = settings.nr_processing_order;
     view.jitter_uv_x = frame.jitter_uv_x;
@@ -1412,7 +1578,7 @@ bool evaluate_dlss_nr(
         diagnostics.evaluation_calls % 300U == 0U) {
         trace_event(
             "DLSS-NR active route=%s view=%llu region=%ux%u@%u,%u "
-            "working=%ux%u evaluations=%llu",
+            "working=%ux%u evaluations=%llu colorPipeline=%u signal=%u scalingDomain=%u exposureMode=%u exposureTexture=%s exposureMultiplier=%.4f",
             dlss_nr_route_name(frame.route),
             static_cast<unsigned long long>(frame.view_id),
             region.width,
@@ -1421,10 +1587,96 @@ bool evaluate_dlss_nr(
             region.base_y,
             working_width,
             working_height,
-            static_cast<unsigned long long>(diagnostics.evaluation_calls)
+            static_cast<unsigned long long>(diagnostics.evaluation_calls),
+            settings.nr_color_pipeline, settings.nr_signal_encoding, settings.nr_scaling_domain,
+            settings.nr_exposure_mode, gpu->exposure_texture ? "available" : "identity-fallback",
+            settings.nr_exposure_multiplier
         );
     }
+    } // Release NR execution locks before starting the independent second pass.
+
+    // Optional second DLSS-NR pass. It intentionally reuses the exact same
+    // foveated geometry, but gets its own temporal history/view identity so
+    // the second pass never corrupts the first pass history. The first pass
+    // has already decoded its result back into frame.color at this point, so
+    // this pass consumes the first-pass image and writes its refined result
+    // back into the same foveated region.
+    bool second_pass_succeeded = false;
+    if (allow_second_pass && settings.nr_second_pass && settings.nr_foveated) {
+        static std::atomic<unsigned long long> second_pass_count{0};
+        const auto second_pass_index = second_pass_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (second_pass_index <= 12) {
+            trace_event(
+                "[SecondDLSS5] PASS 2 START index=%llu view=%llu",
+                second_pass_index,
+                static_cast<unsigned long long>(frame.view_id)
+            );
+        }
+        auto second_frame = frame;
+        // Reserve the high bit as an internal NR-pass namespace. Normal view
+        // IDs are small per-eye handles; keeping the namespace separate avoids
+        // sharing temporal history between pass 1 and pass 2.
+        second_frame.view_id = frame.view_id | kNrPass2ViewBit;
+        second_frame.reset = frame.reset;
+        const auto second_settings = nr_settings_for_extra_pass(settings, 2U);
+        if (!evaluate_dlss_nr_internal(second_frame, second_settings, false)) {
+            trace_event(
+                "[SecondDLSS5] PASS 2 FAILED index=%llu view=%llu; keeping first-pass result",
+                second_pass_index,
+                static_cast<unsigned long long>(frame.view_id)
+            );
+        } else {
+            second_pass_succeeded = true;
+            if (second_pass_index <= 12) {
+                trace_event(
+                    "[SecondDLSS5] PASS 2 SUCCESS index=%llu view=%llu",
+                    second_pass_index,
+                    static_cast<unsigned long long>(frame.view_id)
+                );
+            }
+        }
+    }
+
+    // Optional third pass: only runs after a successful pass 2. Pass 2 has
+    // already decoded/composited into frame.color, so pass 3 consumes that
+    // refined image. Pass 3 uses bit 61: bit 62 is reserved by AFW gaze coordination.
+    if (allow_second_pass && settings.nr_third_pass && settings.nr_second_pass &&
+        settings.nr_foveated && second_pass_succeeded) {
+        static std::atomic<unsigned long long> third_pass_count{0};
+        const auto third_pass_index = third_pass_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (third_pass_index <= 12) {
+            trace_event(
+                "[ThirdDLSS5] PASS 3 START index=%llu view=%llu",
+                third_pass_index,
+                static_cast<unsigned long long>(frame.view_id)
+            );
+        }
+        auto third_frame = frame;
+        third_frame.view_id = frame.view_id | kNrPass3ViewBit;
+        third_frame.reset = frame.reset;
+        const auto third_settings = nr_settings_for_extra_pass(settings, 3U);
+        if (!evaluate_dlss_nr_internal(third_frame, third_settings, false)) {
+            trace_event(
+                "[ThirdDLSS5] PASS 3 FAILED index=%llu view=%llu; keeping second-pass result",
+                third_pass_index,
+                static_cast<unsigned long long>(frame.view_id)
+            );
+        } else if (third_pass_index <= 12) {
+            trace_event(
+                "[ThirdDLSS5] PASS 3 SUCCESS index=%llu view=%llu",
+                third_pass_index,
+                static_cast<unsigned long long>(frame.view_id)
+            );
+        }
+    }
     return true;
+}
+
+bool evaluate_dlss_nr(
+    const DlssNrFrame& frame,
+    const Settings& settings
+) noexcept {
+    return evaluate_dlss_nr_internal(frame, settings, true);
 }
 
 void draw_dlss_nr_border(const DlssNrFrame& input_frame, const Settings& input_settings) noexcept {
@@ -1484,14 +1736,21 @@ void collect_dlss_nr_submissions() noexcept {
 }
 void skip_dlss_nr_history(const DlssViewId view_id) noexcept {
     std::lock_guard lock(nr_mutex);
-    for (auto& view : views) if (view.view_id == view_id) view.was_enabled = false;
+    const auto base = nr_base_view_id(view_id);
+    for (auto& view : views) {
+        if (nr_base_view_id(view.view_id) == base) { view.was_enabled = false; view.edit_cache.invalidate(); view.model_history_gap = true; }
+    }
 }
 
 void release_dlss_nr_view(const DlssViewId view_id) noexcept {
     std::lock_guard execution_lock(calibration12_execution_mutex());
-    release_dlss_nr_inputs(view_id);
+    const auto base = nr_base_view_id(view_id);
+    // Inputs are owned by the real game view; pass 2/3 only have private NR histories.
+    release_dlss_nr_inputs(base);
     std::lock_guard lock(nr_mutex);
-    for (auto& view : views) if (view.view_id == view_id) view.retired = true;
+    for (auto& view : views) {
+        if (nr_base_view_id(view.view_id) == base) view.retired = true;
+    }
     collect_retired_views();
 }
 void release_dlss_nr_resources() noexcept {
@@ -1548,5 +1807,7 @@ const char* dlss_nr_route_name(const DlssNrRoute route) noexcept {
     }
     return "Unknown";
 }
+
+void stop_nr_f5() noexcept { nr_f5::shutdown(); }
 
 }  // namespace cheeky::foveated_dlss

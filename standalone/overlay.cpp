@@ -694,6 +694,7 @@ void overlay_present(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, const
         }
         cheeky_overlay_color_mode = shader_color_mode(color_space, r.format);
         ContextScope scope(r.context);
+        tick_nr_comparison(r, runtime, menu_open);
         if (r.attachment != runtime.attachment) { r.attachment = runtime.attachment; r.next_snapshot = 0; }
         const int desktop_events_begin = ImGui::GetCurrentContext()->InputEventsQueue.Size;
         process_overlay_input(*r.input, r.vr_buttons | unsigned(r.xr_pointer_down));

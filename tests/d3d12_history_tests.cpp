@@ -14,8 +14,8 @@ namespace cheeky::foveated_dlss {
 // This fixture links the production SR backend. Independent NR/periphery
 // inference is covered by the existing runtime fixtures.
 void release_dlss_nr_view(DlssViewId) noexcept {}
-void release_peripheral_dlaa_resources() noexcept {}
 }
+void run_peripheral_recovery_tests();
 
 namespace {
 using namespace cheeky::foveated_dlss;
@@ -263,6 +263,7 @@ void run_alternating(bool low_res_motion, float margin, unsigned feature = 1U, f
 
 int run_d3d12_history_tests() {
     try {
+        run_peripheral_recovery_tests();
         for (bool low_res_motion : {false, true})
             for (float margin : {0.F, 1.F / 32, 2.F / 32}) run_alternating(low_res_motion, margin);
         // RR's supported low-resolution vectors include pixel-space vectors

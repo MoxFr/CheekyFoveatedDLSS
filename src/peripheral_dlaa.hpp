@@ -32,6 +32,8 @@ struct PeripheralDlaaRequest {
     std::uint32_t source_output_width{};
     std::uint32_t source_output_height{};
     float scale{1.0F};
+    bool super_resolution{};
+    bool spatial_fsr1{};
     std::uint32_t preset{5U};
     std::uint32_t color_base_x{};
     std::uint32_t color_base_y{};
@@ -44,6 +46,9 @@ struct PeripheralDlaaRequest {
     float motion_vector_scale_y{1.0F};
     bool depth_inverted{};
     bool reset{};
+    bool startup_recovery_eligible{};
+    std::uint64_t startup_recovery_session{};
+    unsigned startup_recovery_eye{};
     std::uint32_t create_flags{};
     NgxParameters* parameters{};
     D3D12BackendCallbacks callbacks{};
@@ -62,6 +67,7 @@ struct PeripheralDlaaResources {
     std::uint32_t mv_base_y{};
     std::uint32_t working_width{};
     std::uint32_t working_height{};
+    std::uint32_t target_width{},target_height{};
     std::array<ID3D12Resource*, rr_guide_count> rr_guides{};
     bool downsampled_color{};
     bool downsampled_depth{};
@@ -101,6 +107,8 @@ void restore_peripheral_dlaa_output(
 ) noexcept;
 
 void release_peripheral_dlaa_view(DlssViewId view_id) noexcept;
+struct PeripheralSrDiagnostics {std::uint64_t evaluations{};std::uint32_t input_width{},input_height{},output_width{},output_height{},quality{};};
+PeripheralSrDiagnostics peripheral_sr_diagnostics();
 void release_peripheral_dlaa_resources() noexcept;
 void note_peripheral_dlaa_submission(
     ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* command_list

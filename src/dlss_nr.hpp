@@ -76,9 +76,14 @@ struct DlssNrFrame {
     std::uint32_t motion_full_width{}, motion_full_height{}, depth_full_width{}, depth_full_height{};
     std::uint32_t motion_copy_x{}, motion_copy_y{}, depth_copy_x{}, depth_copy_y{};
     std::uint32_t view_output_base_x{}, view_output_base_y{}; // Retained when Before NR switches color to input space.
+    // Optional current-view exposure texture; no implicit pre-exposure scalar.
+    ID3D12Resource* exposure_texture{};
+    D3D12_RESOURCE_STATES exposure_state{D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
 };
 
 struct DlssNrSnapshot {
+    std::array<char, 4096> runtime_path{};
+    std::array<char, 64> runtime_version{};
     NrProcessingOrder processing_order{NrProcessingOrder::after_upscaling};
     std::uint32_t processing_width{}, processing_height{};
     bool hdr_input{};
@@ -87,6 +92,11 @@ struct DlssNrSnapshot {
     DlssNrRoute route{DlssNrRoute::none};
     std::uint64_t candidate_calls{};
     std::uint64_t evaluation_calls{};
+    std::uint64_t cache_reuses{};
+    double model_gpu_ms{},cache_gpu_ms{};
+    std::uint64_t f5_computed{},f5_reused{},f5_unsupported{};
+    bool f5_hooked{};
+    unsigned gpu_timing_samples{},cache_interval{1};
     std::uint64_t failed_calls{};
     NgxResult last_result{};
     std::uint32_t output_width{};

@@ -35,6 +35,7 @@ struct LateAttachStatus {
 };
 LateAttachStatus late_attach_status() noexcept;
 void stop_interception() noexcept;
+void stop_nr_f5() noexcept;
 [[nodiscard]] bool install_early_loader_interception() noexcept;
 void uninstall_early_loader_interception() noexcept;
 

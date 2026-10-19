@@ -457,6 +457,11 @@ uevr.lua.add_script_panel("Cheeky Foveated DLSS", function()
             check("Show red alignment border", "AlignmentBorder")
             section("Periphery")
             check("Peripheral DLAA", "PeripheralDlaa")
+            check("Peripheral super resolution (experimental)", "PeripheralSr")
+            check("Use FSR1 peripheral reconstruction", "PeripheralFsr1")
+            slider("Peripheral SR scale", "PeripheralSrScale", 0.2, 1)
+            slider("Peripheral FSR1 scale", "PeripheralFsr1Scale", 0.2, 1)
+
             if draft.PeripheralDlaa then
                 if rr then combo("Peripheral RR preset", "RrPeripheralPreset", {[0]="Game/default",[4]="D",[5]="E",[6]="F"})
                 else combo("Peripheral preset", "PeripheralDlaaPreset", {[5]="E",[10]="J",[11]="K",[12]="L",[13]="M"}) end
@@ -474,6 +479,33 @@ uevr.lua.add_script_panel("Cheeky Foveated DLSS", function()
         end
         if status.renderer ~= 0 or draft.D3D11D3D12Transport then
             check("Enable DLSS-NR", "NrEnabled")
+            if imgui.tree_node("Additional NR controls (experimental)") then
+                check("F5 ViT reuse (experimental, restart required)", "NrF5")
+                check("Second NR pass", "NrSecondPass")
+                check("Third NR pass", "NrThirdPass")
+                check("Reproject NR correction", "NrEditCache")
+                check("Adaptive correction cache", "NrAdaptiveCache")
+                slider("Soft GPU budget (ms)", "NrGpuBudgetMs", 0, 30)
+                slider("Maximum cache interval", "NrCacheMaxInterval", 1, 8, true)
+                for pass=1,3 do
+                    local prefix = pass == 1 and "Nr" or ("NrPass" .. pass)
+                    if imgui.tree_node("Pass " .. pass .. " reconstruction") then
+                        slider("Working scale##"..pass, prefix.."WorkingScale", 0.1, 1)
+                        combo("Reconstruction##"..pass, prefix.."Reconstruction", {[0]="Legacy",[1]="RGB residual"})
+                        combo("Downsample##"..pass, prefix.."DownsampleFilter", {[0]="Bilinear",[1]="Area"})
+                        combo("Upsample##"..pass, prefix.."UpsampleFilter", {[0]="Bilinear",[1]="Bicubic"})
+                        slider("Intensity##"..pass, prefix.."Intensity", 0, 1)
+                        combo("Preset##"..pass, prefix.."Preset", {[0]="Default",[1]="A",[2]="B"})
+                        combo("Style##"..pass, prefix.."Style", {[0]="Standard",[1]="Natural",[2]="Cinematic"})
+                        slider("Local tone##"..pass, prefix.."LocalToneStrength", 0, 2)
+                        slider("Local structure##"..pass, prefix.."LocalStructureStrength", 0, 2)
+                        slider("Skin structure##"..pass, prefix.."SkinStructureStrength", 0, 2)
+                        imgui.tree_pop()
+                    end
+                end
+                imgui.tree_pop()
+            end
+
             text("Alt+Shift+> (period key): toggle DLSS-NR")
             if draft.NrEnabled then
                 check("Foveated NR", "NrFoveated")

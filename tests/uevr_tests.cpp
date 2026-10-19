@@ -85,6 +85,27 @@ void wait_gpu(ID3D12Device* device, ID3D12CommandQueue* queue) {
 }
 void settings_tests(const std::filesystem::path& root) {
     Settings s; require(s.d3d12_lower_hook, "Lower hook is the default");
+    for (const auto prefix : {"Nr", "NrPass2", "NrPass3"}) {
+        for (const auto suffix : {"ColorPipeline", "SignalEncoding", "ScalingDomain", "ExposureMode"}) {
+            const auto key = std::string(prefix) + suffix;
+            require(set_named_setting(s, key, "2"), "Parse NR color/exposure enum for every pass");
+            require(field(settings_json(s), key) == 2.0, "NR color/exposure enum missing from JSON");
+        }
+        const auto key = std::string(prefix) + "ExposureMultiplier";
+        require(set_named_setting(s, key, "1.375"), "Parse NR manual exposure for every pass");
+        require(field(settings_json(s), key) == 1.375, "NR manual exposure missing from JSON");
+        require(!set_named_setting(s, key, "nan") && !set_named_setting(s, key, "inf") &&
+            !set_named_setting(s, key, "1.0suffix"), "Reject malformed/nonfinite exposure text");
+    }
+    require(s.nr_reconstruction == 0 && s.nr_pass2_reconstruction == 0 &&
+        s.nr_pass3_reconstruction == 0, "NR reconstruction must default to legacy");
+    for (const auto key : {"NrReconstruction", "NrPass2Reconstruction", "NrPass3Reconstruction",
+        "NrDownsampleFilter", "NrPass2DownsampleFilter", "NrPass3DownsampleFilter",
+        "NrUpsampleFilter", "NrPass2UpsampleFilter", "NrPass3UpsampleFilter"}) {
+        require(set_named_setting(s, key, "1"), "Parse residual reconstruction");
+        require(settings_json(s).find(std::string("\"") + key + "\":1") != std::string::npos,
+            "Residual reconstruction missing from settings JSON");
+    }
     require(!s.manual_stereo_mapping && !s.manual_stereo_right_first && !s.independent_openxr_gaze,
         "Gaze compatibility must be opt-in");
     for (const auto key : {"ManualStereoMapping", "ManualStereoRightFirst", "IndependentOpenXRGaze"})

@@ -1,0 +1,5 @@
+# Preserve the formatting of vendored and compiler-generated shader sources.
+src/f5/** -whitespace
+src/peripheral_fsr1.hlsl -whitespace
+src/peripheral_fsr1_shader.hpp -whitespace
+src/peripheral_fsr1_bytecode.hpp -whitespace

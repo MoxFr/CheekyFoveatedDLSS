@@ -12,4 +12,5 @@ struct OverlayUiState {
     std::uint64_t attachment{},request{};
 };
 void draw_overlay_ui(OverlayUiState&,const OverlayRuntime&,InputState&,const char* renderer,const char* status,bool& open);
+void tick_nr_comparison(OverlayUiState&, const OverlayRuntime&, bool menu_open);
 }

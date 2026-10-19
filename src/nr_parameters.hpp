@@ -40,8 +40,16 @@ inline NgxResult neural_scaling_ratio_callback(NgxParameters* const parameters) 
     };
     append(static_cast<std::uint32_t>(settings.nr_processing_order));
     append(settings.nr_style);
+    append(settings.nr_reconstruction);
+    append(settings.nr_downsample_filter);
+    append(settings.nr_upsample_filter);
+    append(settings.nr_color_pipeline);
+    append(settings.nr_signal_encoding);
+    append(settings.nr_scaling_domain);
+    append(settings.nr_exposure_mode);
     for (const auto value : {
             settings.nr_working_scale,
+            settings.nr_exposure_multiplier,
             settings.nr_intensity,
             settings.nr_local_tone_strength,
             settings.nr_local_structure_strength,

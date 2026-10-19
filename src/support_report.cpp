@@ -265,6 +265,8 @@ std::string diagnostics_text() {
     out << "region_width=" << nr.region_width << '\n';
     out << "region_height=" << nr.region_height << '\n';
     if (nr.skip_reason) out << "skip_reason=" << nr.skip_reason << '\n';
+    out << "runtime_path=" << nr.runtime_path.data() << '\n';
+    out << "runtime_version=" << nr.runtime_version.data() << '\n';
     out << "processing_order=" << nr_processing_order_name(nr.processing_order) << '\n';
     out << "processing_width=" << nr.processing_width << '\n';
     out << "processing_height=" << nr.processing_height << '\n';

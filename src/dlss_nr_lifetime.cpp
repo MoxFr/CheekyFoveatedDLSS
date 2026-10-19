@@ -8,7 +8,12 @@
 
 namespace cheeky::foveated_dlss {
 using Microsoft::WRL::ComPtr;
+static std::atomic<std::uint64_t> next_nr_recording_token{1};
 struct NrRecording {
+    const std::uint64_t serial=next_nr_recording_token.fetch_add(1);
+    ComPtr<ID3D12CommandQueue> clock_queue;
+    std::uint64_t clock_frequency{};
+    bool ambiguous_clock{};
     struct Point {
         ComPtr<ID3D12CommandQueue> queue;
         ComPtr<ID3D12Fence> fence;
@@ -81,6 +86,10 @@ void collect_recording(NrRecording& recording, NrSignal submit_signal) {
     }
 }
 }
+std::uint64_t nr_recording_token(ID3D12GraphicsCommandList* list) noexcept {
+    std::lock_guard lock(calibration12_execution_mutex());
+    const auto tag=identity(list);return tag&&tag->current?tag->current->serial:0;
+}
 bool ensure_dlss_nr_recording(ID3D12GraphicsCommandList* list) noexcept {
     const auto native = native_d3d12_interface(list);
     list = native.Get();
@@ -120,6 +129,10 @@ void nr_recording_submitted(ID3D12CommandQueue* queue, ID3D12Object* list, NrSig
     const auto tag = identity(list);
     if (!tag || !tag->current) return;
     auto& recording = *tag->current;
+    if (!recording.clock_queue) {
+        recording.clock_queue = queue;
+        if (FAILED(queue->GetTimestampFrequency(&recording.clock_frequency))) recording.clock_frequency=0;
+    } else if (recording.clock_queue.Get()!=queue) recording.ambiguous_clock=true;
     // Never share fence values between independent queues: completing one
     // queue must not satisfy a blocked execution on another queue.
     auto found = recording.points.end();
@@ -167,5 +180,14 @@ std::uint64_t NrLifetime::fences_released() const noexcept {
     auto total = released_;
     for (const auto& use : uses_) total += use->released;
     return total;
+}
+std::uint64_t NrLifetime::timestamp_frequency() const noexcept {
+    std::uint64_t frequency{};
+    for(const auto& use:uses_) {
+        if(use->ambiguous_clock || !use->clock_frequency)return 0;
+        if(frequency && frequency!=use->clock_frequency)return 0;
+        frequency=use->clock_frequency;
+    }
+    return frequency;
 }
 } // namespace cheeky::foveated_dlss

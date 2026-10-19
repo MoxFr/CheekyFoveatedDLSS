@@ -55,6 +55,11 @@ foreach ($packageMode in $modes) {
     if ($IncludeOpenXRSetup) {
         $files["OpenXR\CheekyOpenXRSetup.exe"] = Join-Path $projectRoot "bin\installer\CheekyOpenXRSetup.exe"
     }
+    $files['licenses\OptiScaler-F5-GPLv3.txt'] = Join-Path $projectRoot 'licenses\OptiScaler-F5-GPLv3.txt'
+    $files['licenses\AMD-FSR1-MIT.txt'] = Join-Path $projectRoot 'licenses\AMD-FSR1-MIT.txt'
+    $files['THIRD-PARTY-NOTICES.md'] = Join-Path $projectRoot 'THIRD-PARTY-NOTICES.md'
+    $files['FORK-CHANGES.md'] = Join-Path $projectRoot 'FORK-CHANGES.md'
+    $files['UPSTREAM-INSTALLER.json'] = Join-Path $projectRoot 'UPSTREAM-INSTALLER.json'
     foreach ($fileSource in $files.Values) {
         if (-not (Test-Path -LiteralPath $fileSource -PathType Leaf)) { throw "Missing input: $fileSource. Build first." }
     }

@@ -4,6 +4,10 @@
 #include <cstddef>
 #include <cstring>
 #include <mutex>
+#include <cstdio>
+#include <memory>
+#include <new>
+#pragma comment(lib, "version.lib")
 namespace cheeky::foveated_dlss {
 namespace {
 using GetModuleFileNameWFn=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD);
@@ -148,6 +152,35 @@ NrRuntimeModule load_nr_runtime_module() noexcept {
     }
 
     void* original_get_module_file_name{};
+    // Read the module actually selected by the loader, before installing its
+    // caller-identity compatibility hook. This is file metadata, not model ID.
+    std::array<wchar_t, 32768> loaded_path{};
+    std::snprintf(cached.version.data(), cached.version.size(), "Unknown (no version resource)");
+    const auto path_length = GetModuleFileNameW(cached.module, loaded_path.data(),
+        static_cast<DWORD>(loaded_path.size()));
+    if (path_length && path_length < loaded_path.size()) {
+        if (!WideCharToMultiByte(CP_UTF8, 0, loaded_path.data(), -1,
+                cached.path.data(), static_cast<int>(cached.path.size()), nullptr, nullptr))
+            std::snprintf(cached.path.data(), cached.path.size(), "Unavailable (path exceeds diagnostic buffer)");
+        DWORD unused{};
+        const auto bytes = GetFileVersionInfoSizeW(loaded_path.data(), &unused);
+        if (bytes && bytes <= 1024U * 1024U) {
+            const std::unique_ptr<unsigned char[]> data(new (std::nothrow) unsigned char[bytes]);
+            VS_FIXEDFILEINFO* info{};
+            UINT length{};
+            if (data && GetFileVersionInfoW(loaded_path.data(), 0, bytes, data.get()) &&
+                VerQueryValueW(data.get(), L"\\", reinterpret_cast<void**>(&info), &length) &&
+                length >= sizeof(*info) && info->dwSignature == 0xfeef04bdU) {
+                std::snprintf(cached.version.data(), cached.version.size(), "%u.%u.%u.%u",
+                    HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS),
+                    HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS));
+            }
+        }
+    } else {
+        std::snprintf(cached.path.data(), cached.path.size(), "Unavailable (module path query failed)");
+    }
+    trace_event("DLSS-NR loaded runtime path=%s file_version=%s",
+        cached.path.data(), cached.version.data());
     if (!patch_named_import(
             cached.module,
             "GetModuleFileNameW",

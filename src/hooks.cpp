@@ -1988,6 +1988,7 @@ struct StreamlineCropHistory {
 std::deque<StreamlineCropHistory> streamline_crop_history;
 
 struct StreamlineEvaluation {
+    CachedSlTag nr_exposure{};
     StreamlineCropHistory history{};
     FoveationCenter nr_center{};
     bool has_nr_center{};
@@ -2885,6 +2886,7 @@ DebugExposure current_streamline_debug_exposure(const void* frame, const void* c
     const auto view_id = static_cast<DlssViewId>(evaluation.viewport.value) + 1U;
     register_stereo_view(view_id);
     evaluation.settings = settings_for_view(current_settings(), view_id);
+    evaluation.nr_exposure = streamline_exposure_tag(evaluation.viewport, frame);
     return true;
 }
 
@@ -2903,6 +2905,7 @@ bool prepare_streamline_nr_current(StreamlineEvaluation& evaluation, const void*
             (cached.frame_tagging && cached.tags_frame != key)) break;
         available = true;
         evaluation.viewport = cached.viewport;
+        evaluation.nr_exposure = cached.tags[sl_tag_exposure];
         evaluation.frame_tagging = cached.frame_tagging;
         evaluation.nr_constants = cached.constants;
         evaluation.has_nr_constants = true;
@@ -2978,6 +2981,11 @@ bool streamline_nr_frame(ID3D12GraphicsCommandList* command_list,
         false,
     };
     frame.motion_state = static_cast<D3D12_RESOURCE_STATES>(motion.resource->state);
+    if (evaluation.nr_exposure.present && evaluation.nr_exposure.resource.native &&
+        evaluation.nr_exposure.resource.state != 0xFFFFFFFFU) {
+        frame.exposure_texture = static_cast<ID3D12Resource*>(evaluation.nr_exposure.resource.native);
+        frame.exposure_state = static_cast<D3D12_RESOURCE_STATES>(evaluation.nr_exposure.resource.state);
+    }
     frame.depth_state = static_cast<D3D12_RESOURCE_STATES>(depth.resource->state);
     frame.jitter_uv_x = dlss_nr_ngx_motion_uv_scale(evaluation.nr_constants.jitter_offset.x, input_width);
     frame.jitter_uv_y = dlss_nr_ngx_motion_uv_scale(evaluation.nr_constants.jitter_offset.y, input_height);
@@ -3262,6 +3270,9 @@ std::uint32_t hook_sl_set_constants(
             static_cast<const SlConstants*>(values)->camera_view_to_clip.values);
         if (result != 0U || static_cast<const SlConstants*>(values)->orthographic_projection != 0)
             projection = {};
+        if (current_settings().center_mode == FoveationCenterMode::openxr_gaze_right_eye &&
+            GetModuleHandleW(L"CyberpunkVR_Stereo.dll") && (id & 0x60000000U) == 0)
+            record_shared_gaze_projection(projection, id);
         const auto camera_frame_key = gaze_frame_key(frame);
         AcquireSRWLockExclusive(&streamline_lock);
         streamline_gaze_projections.record(id, camera_frame_key, GetTickCount64(), projection);
@@ -4657,6 +4668,7 @@ NgxResult hook_core_create_d3d12(
     frame.jitter_uv_y = dlss_nr_ngx_motion_uv_scale(get_d3d12_parameter_float(parameters, "Jitter.Offset.Y", 0.0F), input_height);
     frame.motion_vectors_jittered = (flags & (1U << 2U)) != 0U;
     frame.view_output_base_x = frame.color_base_x; frame.view_output_base_y = frame.color_base_y;
+    frame.exposure_texture = get_d3d12_parameter_resource(parameters, "ExposureTexture");
     return frame;
 }
 
@@ -4825,12 +4837,14 @@ void evaluate_nr_after_native_d3d12(
 
     PeripheralDlaaResources peripheral{};
     bool peripheral_ready{};
-    if ((rr || effective_settings.peripheral_dlaa_enabled) &&
+    if ((rr || effective_settings.peripheral_dlaa_enabled || effective_settings.peripheral_sr_enabled) &&
         (contract.feature_id == 1U || rr) &&
         full_color != nullptr && full_depth != nullptr &&
         full_motion != nullptr && full_output != nullptr) {
         PeripheralDlaaRequest peripheral_request{};
         peripheral_request.view_id = contract.view_id;
+        peripheral_request.super_resolution=effective_settings.peripheral_sr_enabled&&!rr;
+        peripheral_request.spatial_fsr1=peripheral_request.super_resolution && effective_settings.peripheral_fsr1_enabled;
         peripheral_request.feature_id = contract.feature_id;
         peripheral_request.command_list = command_list;
         peripheral_request.color = full_color;
@@ -4841,8 +4855,8 @@ void evaluate_nr_after_native_d3d12(
         peripheral_request.render_height = contract.render_height;
         peripheral_request.source_output_width = contract.output_width;
         peripheral_request.source_output_height = contract.output_height;
-        peripheral_request.scale = rr && !effective_settings.peripheral_dlaa_enabled ? 1.F : effective_settings.peripheral_dlaa_scale;
-        peripheral_request.preset = rr ? effective_settings.rr_peripheral_preset : effective_settings.peripheral_dlaa_preset;
+        peripheral_request.scale = peripheral_request.spatial_fsr1?effective_settings.peripheral_fsr1_scale:peripheral_request.super_resolution?effective_settings.peripheral_sr_scale:(rr && !effective_settings.peripheral_dlaa_enabled ? 1.F : effective_settings.peripheral_dlaa_scale);
+        peripheral_request.preset = peripheral_request.super_resolution?0U:(rr ? effective_settings.rr_peripheral_preset : effective_settings.peripheral_dlaa_preset);
         peripheral_request.color_base_x = full_color_x;
         peripheral_request.color_base_y = full_color_y;
         peripheral_request.depth_base_x = full_depth_x;
@@ -4857,6 +4871,14 @@ void evaluate_nr_after_native_d3d12(
             contract.motion_vector_scale_y;
         peripheral_request.depth_inverted = contract.depth_inverted;
         peripheral_request.reset = contract.reset;
+        // Do not apply UEVR startup recovery to standalone, RR or unverified
+        // eye assignments. Calibration publishes an atomic verified eye pair.
+        const auto assignment = stereo_eye_assignment(contract.view_id);
+        peripheral_request.startup_recovery_eligible = !rr && !contract.reset &&
+            GetModuleHandleW(L"UEVRBackend.dll") != nullptr &&
+            assignment.assigned && assignment.calibrated && !assignment.shared_source;
+        peripheral_request.startup_recovery_session = assignment.calibration_session;
+        peripheral_request.startup_recovery_eye = assignment.eye_index;
         peripheral_request.create_flags = contract.create_flags;
         peripheral_request.parameters =
             const_cast<NgxParameters*>(parameters);
@@ -6822,6 +6844,7 @@ void stop_interception() noexcept {
     if (streamline_hook_lock_ready.load(std::memory_order_acquire)) {
         uninstall_streamline_inline_hooks();
     }
+    stop_nr_f5();
     shutdown_direct_export_hooks();
     release_d3d11_dlss_timers();
     release_d3d11_peripheral_dlaa_resources();

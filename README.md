@@ -1,3 +1,11 @@
+# Cheeky Foveated DLSS — MoxFr experimental fork
+
+Public fork of [ClarkCheekyKent/CheekyFoveatedDLSS](https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS), based on upstream v0.5.5. Original work and credits belong to its upstream contributors. This fork adds experimental SR/NR controls for UEVR and Standalone.
+
+See [fork changes and limitations](FORK-CHANGES.md), [build instructions](DEVELOPMENT.md), and [GPLv3](LICENSE). Use the matching complete UEVR or Standalone package. NVIDIA model/runtime DLLs are not distributed here. This is not an official upstream release.
+
+---
+
 # Cheeky Foveated DLSS
 
 Reduce the cost of DLSS Super Resolution by concentrating it on the center of the image. Available as a **UEVR plugin**, or **standalone integration**, for Vulkan, Direct3D 11 and Direct3D 12 games. With DLSS Performance FPS gains of 20%+ are standard, even more with eye tracked headsets which can make the foveated region even smaller.

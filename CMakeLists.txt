@@ -161,6 +161,8 @@ add_executable(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d11_backend.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/motion_resample_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/d3d12_history_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/peripheral_recovery_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/peripheral_dlaa.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/d3d12_safety_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12_backend.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/crop_motion.cpp"
@@ -207,6 +209,7 @@ if(MSVC)
     target_compile_options(CheekyTests PRIVATE /W4 /permissive- /utf-8)
 endif()
 add_test(NAME CheekyGazeTests COMMAND CheekyTests)
+add_test(NAME CheekyCyberpunkSharedGaze COMMAND CheekyTests --cyberpunk-shared-gaze)
 add_test(NAME CheekyHookPath COMMAND CheekyTests --hook-path)
 add_test(NAME CheekyOpenXRInputTests COMMAND CheekyTests --openxr-input)
 add_test(NAME CheekyManualGaze COMMAND CheekyTests --manual-gaze)

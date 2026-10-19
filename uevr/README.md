@@ -64,7 +64,29 @@ NR **Style** offers Standard, Natural and Cinematic. **Intensity** runs from 0
 (no model edit) to 1 (full edit). **Skin structure** appears with Automatic mask
 enabled; **Paper white** appears for HDR NR input.
 
+With NR and Foveated NR enabled, **Second DLSS 5 pass** and then **Third DLSS 5
+pass** enable the additional stages. Each has a separate settings tree for
+working scale, preset, style, intensity and advanced controls. Disabling pass 2
+also disables pass 3; disabling NR leaves the per-pass tuning saved. Extra
+passes increase GPU work. Controls are hidden if the connected runtime does
+not expose the corresponding settings. Existing profiles are not auto-enabled.
+
 ## Reports and details
+
+### Experimental NR reconstruction
+
+Each NR pass offers **Legacy** (default) and **RGB residual (experimental)**.
+Residual applies `original + (NR output - NR input proxy)` before the existing
+strength/foveation blend, retaining source detail when working scale is reduced.
+HDR differences are computed after decoding the proxy/output to linear RGB.
+Alpha and pixels outside the foveated region remain owned by the original image.
+Changing mode resets NR temporal history. Old profiles stay on Legacy.
+
+This is a local adaptation of RenoDX's exposed residual-reconstruction concept,
+not a verified copy of its shader math. It does not add an NR evaluation or
+texture allocation, but actual GPU cost and visual quality need measurement.
+It may retain source shimmer/noise as well as useful detail; it is not an
+antialiasing fix. Compare at the same working scale, with one NR pass first.
 
 **Report an issue...** creates a support ZIP and opens a GitHub issue. Add your description and attach the ZIP; nothing is uploaded automatically. ZIPs are saved in `support/` under the game's UEVR configuration directory.
 
@@ -100,6 +122,37 @@ The coverage selector offers:
 **Advanced AFW → Extra margin per edge** adds a fixed allowance around the requested regions. It is a fraction of the full image, so 0.05 adds 5% on each edge. Stereo coverage and this margin can enlarge the visible region beyond the requested width and height. Automatic depth adjustment is removed. Existing coverage preferences and manual margin values are preserved.
 
 The same controls apply to foveated NR with SR disabled. NR supports Before/After upscaling, full-frame or foveated processing, working scale, and independent or SR-linked size and shape. Supply a compatible `nvngx_dlssnr.dll` as described above.
+
+### Reference-derived NR color bridge
+
+Each pass now offers **NR color pipeline**: Legacy, Linear BT.709 bridge, or
+simple sRGB bridge. Linear BT.709 matches RenoDX's native DLSS input assumption;
+the bridge compresses HDR smoothly and restores the original pixel's scale.
+Signal encoding and scaling domain are independent (sRGB/PQ/linear). Residual
+is applied inside the compressed bridge before restoring HDR, not to raw RGB.
+With bridge modes, the Legacy reconstruction choice means processed-image output.
+
+**NR exposure texture** can multiply or divide the game's validated1x1 exposure
+texture on D3D12; invalid/missing textures use1. The manual multiplier defaults
+to1, and Paper white scale1 represents100nits. Vulkan and D3D11 transport do not
+yet carry exposure textures. No pre-exposure scalar is blindly applied.
+
+Legacy remains the default for old configurations. HDR10/scRGB gamut parity,
+exact reference cubic filtering and guide-jitter equivalence are not claimed.
+This path can cost more shader work; compare GPU timings and actual appearance.
+
+### NR resampling controls
+
+Each NR pass has **NR downsample filter** (Bilinear or Area) and **NR upsample
+filter** (Bilinear or Bicubic clamped). Bilinear remains the default for existing
+configurations. Area integrates the input pixel footprint; bicubic reconstructs
+the low-resolution output with a local clamp to limit ringing. They work with
+Legacy or RGB-residual reconstruction and reset NR history when changed.
+
+These filters add sampling work, not extra NR evaluations. They are not an SR
+preset or peripheral DLAA fix. At exactly half scale, area can match bilinear;
+compare at another fractional scale as well. Keep other settings fixed and
+measure GPU time before assuming any quality/performance benefit.
 
 ### Gaze and transitions
 

@@ -1,9 +1,11 @@
 #include "depth_formats.hpp"
 #include "peripheral_dlaa.hpp"
 #include "peripheral_shaders.hpp"
+#include "peripheral_fsr1_bytecode.hpp"
 #include "d3d_shaders.hpp"
 #include "motion_region.hpp"
 #include "rr_contract.hpp"
+#include "peripheral_recovery.hpp"
 
 #include "runtime.hpp"
 
@@ -71,6 +73,8 @@ struct PeripheralGpuUse {
 };
 
 struct PeripheralViewState {
+    PeripheralStartupRecovery recovery{};
+    DetachedD3D12Feature retired_feature{};
     DlssViewId view_id{};
     ID3D12Device* device{};
     ID3D12Resource* output{};
@@ -83,11 +87,13 @@ struct PeripheralViewState {
     ID3D12RootSignature* converter_root{};
     ID3D12PipelineState* converter_pipeline{};
     ID3D12PipelineState* color_pipeline{};
+    ID3D12PipelineState* fsr1_pipeline{};
     ID3D12PipelineState* depth_pipeline{};
     std::uint32_t render_width{};
     std::uint32_t render_height{};
     std::uint32_t working_width{};
     std::uint32_t working_height{};
+    std::uint32_t target_width{},target_height{};
     DXGI_FORMAT color_format{DXGI_FORMAT_UNKNOWN};
     DXGI_FORMAT depth_format{DXGI_FORMAT_UNKNOWN};
     DXGI_FORMAT output_format{DXGI_FORMAT_UNKNOWN};
@@ -98,6 +104,7 @@ struct PeripheralViewState {
 };
 
 std::mutex state_mutex;
+std::mutex sr_diagnostic_mutex;PeripheralSrDiagnostics sr_diagnostic;
 std::deque<PeripheralViewState> states;
 std::deque<PeripheralViewState> retired_states;
 
@@ -118,9 +125,12 @@ void record_gpu_use(
 }
 
 void release_state(PeripheralViewState& state) noexcept {
+    if (state.retired_feature.handle && state.retired_feature.release)
+        static_cast<void>(state.retired_feature.release(state.retired_feature.handle));
     for (auto& use : state.gpu_uses) release_gpu_use(use);
     for (auto& resource : state.rr_textures) release(resource);
     release(state.rr_pipeline);
+    release(state.fsr1_pipeline);
     release(state.depth_pipeline);
     release(state.color_pipeline);
     release(state.converter_pipeline);
@@ -173,6 +183,7 @@ void release_state(PeripheralViewState& state) noexcept {
 
 [[nodiscard]] bool create_converter(PeripheralViewState& state) noexcept {
     release(state.rr_pipeline);
+    release(state.fsr1_pipeline);
     release(state.depth_pipeline);
     release(state.color_pipeline);
     release(state.converter_pipeline);
@@ -211,7 +222,9 @@ void release_state(PeripheralViewState& state) noexcept {
     parameters[2].Constants.ShaderRegister = 0U;
     parameters[2].Constants.Num32BitValues = 6U;
 
+    D3D12_STATIC_SAMPLER_DESC sampler{};sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;sampler.MaxLOD=D3D12_FLOAT32_MAX;sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
     D3D12_ROOT_SIGNATURE_DESC root_desc{};
+    root_desc.NumStaticSamplers=1;root_desc.pStaticSamplers=&sampler;
     root_desc.NumParameters = 3U;
     root_desc.pParameters = parameters;
 
@@ -326,25 +339,41 @@ void release_state(PeripheralViewState& state) noexcept {
             state.render_height == request.render_height &&
             state.working_width == dimensions.width &&
             state.working_height == dimensions.height &&
+            state.target_width == (request.super_resolution?request.source_output_width:dimensions.width) &&
+            state.target_height == (request.super_resolution?request.source_output_height:dimensions.height) &&
             state.color_format == color_format &&
             state.depth_format == depth_format &&
             state.output_format == output_desc.Format &&
             state.motion_format == motion_format;
-        if (compatible) {
+        const bool rebuild = state.recovery.begin(request.startup_recovery_eligible,
+            request.startup_recovery_session, request.startup_recovery_eye,
+            request.preset, request.create_flags, compatible);
+        if (compatible && !rebuild) {
             device->Release();
             record_gpu_use(state, request.command_list);
             return &state;
         }
         // Recorded command lists do not retain the resources referenced by
         // their descriptors. Keep the old generation until its queues finish.
+        const auto recovery = state.recovery;
+        state.retired_feature = detach_d3d12_feature(peripheral_dlaa_view_id(state.view_id));
+        if (rebuild)
+            trace_event("PERIPHERAL UEVR STARTUP REBUILD view=%llu eye=%u session=%llu "
+                "size=%ux%u scale=%.9g successful_evals=%u pending_gpu_uses=%zu",
+                static_cast<unsigned long long>(state.view_id), request.startup_recovery_eye,
+                static_cast<unsigned long long>(request.startup_recovery_session),
+                dimensions.width, dimensions.height, request.scale,
+                recovery.successes, state.gpu_uses.size());
         retired_states.push_back(std::move(state));
         state = {};
+        state.recovery = recovery;
         state.view_id = request.view_id;
         state.device = device;
         state.render_width = request.render_width;
         state.render_height = request.render_height;
         state.working_width = dimensions.width;
         state.working_height = dimensions.height;
+    state.target_width=request.super_resolution?request.source_output_width:dimensions.width;state.target_height=request.super_resolution?request.source_output_height:dimensions.height;
         state.color_format = color_format;
         state.depth_format = depth_format;
         state.output_format = output_desc.Format;
@@ -361,10 +390,14 @@ void release_state(PeripheralViewState& state) noexcept {
     state.render_height = request.render_height;
     state.working_width = dimensions.width;
     state.working_height = dimensions.height;
+    state.target_width=request.super_resolution?request.source_output_width:dimensions.width;state.target_height=request.super_resolution?request.source_output_height:dimensions.height;
     state.color_format = color_format;
     state.depth_format = depth_format;
     state.output_format = output_desc.Format;
     state.motion_format = motion_format;
+    static_cast<void>(state.recovery.begin(request.startup_recovery_eligible,
+        request.startup_recovery_session, request.startup_recovery_eye,
+        request.preset, request.create_flags, true));
     record_gpu_use(state, request.command_list);
     return &state;
 }
@@ -376,8 +409,8 @@ void release_state(PeripheralViewState& state) noexcept {
     if (request.output_override != nullptr) {
         const auto desc = request.output_override->GetDesc();
         return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-            desc.Width == state.working_width &&
-            desc.Height == state.working_height;
+            desc.Width == state.target_width &&
+            desc.Height == state.target_height;
     }
     if (state.output != nullptr) return true;
     if (request.output_template == nullptr) return false;
@@ -385,15 +418,15 @@ void release_state(PeripheralViewState& state) noexcept {
     if (!create_texture(
             state.device,
             desc,
-            state.working_width,
-            state.working_height,
+            state.target_width,
+            state.target_height,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             &state.output,
             state.output_format
         )) {
         return false;
     }
-    state.output->SetName(L"Cheeky Peripheral DLAA output");
+    state.output->SetName(request.super_resolution?L"Cheeky Peripheral DLSS SR output":L"Cheeky Peripheral DLAA output");
     return true;
 }
 
@@ -545,8 +578,8 @@ void release_state(PeripheralViewState& state) noexcept {
         source_base_y,
         source_width,
         source_height,
-        state.working_width,
-        state.working_height,
+        static_cast<std::uint32_t>(destination->GetDesc().Width),
+        destination->GetDesc().Height,
     };
     request.command_list->SetComputeRoot32BitConstants(
         2U,
@@ -555,8 +588,8 @@ void release_state(PeripheralViewState& state) noexcept {
         0U
     );
     request.command_list->Dispatch(
-        (state.working_width + 15U) / 16U,
-        (state.working_height + 15U) / 16U,
+        (static_cast<std::uint32_t>(destination->GetDesc().Width) + 15U) / 16U,
+        (destination->GetDesc().Height + 15U) / 16U,
         1U
     );
     uav_barrier(request.command_list, destination);
@@ -660,6 +693,8 @@ void release_state(PeripheralViewState& state) noexcept {
 
 }  // namespace
 
+PeripheralSrDiagnostics peripheral_sr_diagnostics(){std::lock_guard lock(sr_diagnostic_mutex);return sr_diagnostic;}
+
 DlssViewId peripheral_dlaa_view_id(const DlssViewId view_id) noexcept {
     return view_id ^ peripheral_view_mask;
 }
@@ -696,6 +731,7 @@ bool prepare_peripheral_dlaa_resources(
 
     resources.working_width = state->working_width;
     resources.working_height = state->working_height;
+    resources.target_width=state->target_width;resources.target_height=state->target_height;
     resources.output = request.output_override != nullptr
         ? request.output_override
         : state->output;
@@ -748,6 +784,7 @@ bool prepare_peripheral_dlaa_resources(
         resources.color_base_y = 0U;
         resources.downsampled_color = true;
 
+        if (!request.spatial_fsr1) {
         if (!convert_depth(*state, request)) return fail();
         resources.depth = state->downsampled_depth;
         resources.depth_base_x = 0U;
@@ -759,6 +796,7 @@ bool prepare_peripheral_dlaa_resources(
         resources.mv_base_x = 0U;
         resources.mv_base_y = 0U;
         resources.converted_motion = true;
+        }
     } else if (request.motion_vectors_output_space) {
         if (!convert_motion(*state, request)) return fail();
         resources.motion_vectors = state->converted_motion;
@@ -792,22 +830,44 @@ bool evaluate_peripheral_dlaa_ngx(
     NgxResult& result,
     D3D12BackendTiming* const timing
 ) noexcept {
+    const auto completed = [&](bool success) {
+        std::lock_guard lock(state_mutex);
+        for (auto& state : states) if (state.view_id == request.view_id) {
+            state.recovery.completed(success);
+            break;
+        }
+    };
     result = 0xBAD00005U;
     if (request.parameters == nullptr ||
         request.callbacks.create_feature == nullptr ||
         request.callbacks.evaluate_feature == nullptr ||
         request.callbacks.release_feature == nullptr ||
         !prepare_peripheral_dlaa_resources(request, resources)) {
+        completed(false);
         return false;
     }
 
+    if (request.spatial_fsr1) {
+        auto* state=find_or_create_state(request);
+        if (!state || !ensure_resampler(*state)) return false;
+        if (!state->fsr1_pipeline) {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};desc.pRootSignature=state->converter_root;desc.CS={peripheral_fsr1_bytecode,sizeof(peripheral_fsr1_bytecode)};
+            if(FAILED(state->device->CreateComputePipelineState(&desc,IID_PPV_ARGS(&state->fsr1_pipeline))))return false;
+        }
+        const bool ok=dispatch_resample(*state,request,resources.color,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,typed_resource_format(resources.color->GetDesc().Format),resources.output,typed_resource_format(resources.output->GetDesc().Format),state->fsr1_pipeline,resources.color_base_x,resources.color_base_y,resources.working_width,resources.working_height);
+        finish_peripheral_dlaa_motion_read(request.command_list,resources);
+        if(!ok)return false;
+        // The shared compositor expects the peripheral output as an SRV.
+        {std::lock_guard lock(sr_diagnostic_mutex);++sr_diagnostic.evaluations;sr_diagnostic.input_width=resources.working_width;sr_diagnostic.input_height=resources.working_height;sr_diagnostic.output_width=resources.target_width;sr_diagnostic.output_height=resources.target_height;sr_diagnostic.quality=100;}
+        result=1U;return true;
+    }
     DlssFrameContract contract{};
     contract.view_id = peripheral_dlaa_view_id(request.view_id);
     contract.feature_id = request.feature_id;
     contract.render_width = resources.working_width;
     contract.render_height = resources.working_height;
-    contract.output_width = resources.working_width;
-    contract.output_height = resources.working_height;
+    contract.output_width = resources.target_width;
+    contract.output_height = resources.target_height;
     contract.color_base_x = resources.color_base_x;
     contract.color_base_y = resources.color_base_y;
     contract.depth_base_x = resources.depth_base_x;
@@ -818,7 +878,7 @@ bool evaluate_peripheral_dlaa_ngx(
     contract.depth_inverted = request.depth_inverted;
     contract.reset = request.reset;
     contract.create_flags = request.create_flags | dlss_feature_flag_mv_low_res;
-    contract.perf_quality = perf_quality_dlaa;
+    contract.perf_quality = request.super_resolution?0U:perf_quality_dlaa;
 
     D3D12DlssInputs inputs{};
     inputs.color = resources.color;
@@ -839,15 +899,15 @@ bool evaluate_peripheral_dlaa_ngx(
         resources.working_height,
         0U,
         0U,
-        resources.working_width,
-        resources.working_height,
+        resources.target_width,
+        resources.target_height,
     };
 
     const auto saved_quality = get_ngx_integer_bits(
         request.parameters,
         "PerfQualityValue"
     );
-    const auto* preset_name = request.feature_id == 13U ? rr_presets[0] : "DLSS.Hint.Render.Preset.DLAA";
+    const auto* preset_name = request.feature_id == 13U ? rr_presets[0] : (request.super_resolution?"DLSS.Hint.Render.Preset.Performance":"DLSS.Hint.Render.Preset.DLAA");
     const auto saved_preset = get_ngx_integer_bits(request.parameters, preset_name);
     const auto saved_flags = get_ngx_integer_bits(
         request.parameters,
@@ -902,7 +962,7 @@ bool evaluate_peripheral_dlaa_ngx(
             static_cast<float>(request.render_height)
         : 1.0F;
 
-    request.parameters->Set("PerfQualityValue", perf_quality_dlaa);
+    request.parameters->Set("PerfQualityValue", contract.perf_quality);
     if (request.preset) request.parameters->Set(preset_name, request.preset);
     request.parameters->Set(
         "DLSS.Feature.Create.Flags",
@@ -945,6 +1005,7 @@ bool evaluate_peripheral_dlaa_ngx(
     request.parameters->Set("Jitter.Offset.X", saved_jitter_x);
     request.parameters->Set("Jitter.Offset.Y", saved_jitter_y);
 
+    completed(ngx_succeeded(result));
     if (!ngx_succeeded(result)) {
         finish_peripheral_dlaa_motion_read(request.command_list, resources);
         if (resources.output_restore_state !=
@@ -962,6 +1023,7 @@ bool evaluate_peripheral_dlaa_ngx(
 
     finish_peripheral_dlaa_motion_read(request.command_list, resources);
     finish_peripheral_dlaa_write(request.command_list, resources);
+    if(request.super_resolution){std::lock_guard lock(sr_diagnostic_mutex);++sr_diagnostic.evaluations;sr_diagnostic.input_width=contract.render_width;sr_diagnostic.input_height=contract.render_height;sr_diagnostic.output_width=contract.output_width;sr_diagnostic.output_height=contract.output_height;sr_diagnostic.quality=contract.perf_quality;}
     return true;
 }
 
@@ -1031,6 +1093,7 @@ void release_peripheral_dlaa_view(const DlssViewId view_id) noexcept {
         std::lock_guard lock(state_mutex);
         for (auto iterator = states.begin(); iterator != states.end(); ++iterator) {
             if (iterator->view_id != view_id) continue;
+            iterator->retired_feature = detach_d3d12_feature(peripheral_dlaa_view_id(view_id));
             retired_states.push_back(std::move(*iterator));
             states.erase(iterator);
             break;
